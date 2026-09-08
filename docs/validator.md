@@ -8,7 +8,7 @@ scene/session IDs, and the tool URL are public.
 
 ## Prerequisites and local verification
 
-Complete the [local quickstart](workflows.md), including its generated scene and
+Complete the [local quickstart](../README.md#get-started), including its generated scene and
 no-chain round with the empty base miner. Dependencies are declared in `pyproject.toml`.
 
 For network operation, obtain the intended network, subnet UID, registration

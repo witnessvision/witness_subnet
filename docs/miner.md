@@ -6,7 +6,7 @@ observation strategy, provider integration or competitive inference code.
 
 ## Install and verify
 
-Follow the [local quickstart](workflows.md). The local round runs the base miner
+Follow the [local quickstart](../README.md#get-started). The local round runs the base miner
 without a wallet or chain connection. Empty responses are expected; this checks
 integration and does not demonstrate mining performance.
 
@@ -14,11 +14,11 @@ integration and does not demonstrate mining performance.
 
 Subclass `WitnessMiner` from `witness.subnet.miner` and implement its asynchronous
 `reconstruct(task)` method in your own package. It must return a dictionary
-following the [reconstruction contract](reconstruction.md).
+following the [reconstruction schema](../witness/contract.py).
 
 The task supplies public metadata, questions, a deadline, independent observation
 budgets, `tool_base_url` and `session_id`. Use that assigned session with the
-[observation API](observations.md). Do not create another session or access
+[observation API client](../witness/tools/client.py). Do not create another session or access
 validator reference labels. The protocol does not prescribe a model or provider.
 
 Use nonblocking inference and bounded external requests. Propagate cancellation;

@@ -6,7 +6,7 @@ Witness defines tasks in which miners inspect video through metered observation
 tools and return a structured reconstruction. Validators score responses against
 private reference labels and aggregate eligible scores into network weights.
 
-[Website](https://witnessvision.io/) · [Documentation](docs/index.md) ·
+[Website](https://witnessvision.io/) ·
 [Base miner](docs/miner.md) · [Validator guide](docs/validator.md)
 
 This repository contains the public protocol, validator, observation API, scoring
@@ -48,8 +48,8 @@ miner response and records simulated weights under `rounds/quickstart/`.
 4. The validator scores the reconstruction using its own metering records,
    applies eligibility and duplicate rules, and aggregates round scores.
 
-See [Protocol](docs/subnet.md), [Observations](docs/observations.md) and
-[Reconstruction](docs/reconstruction.md). Observation units are benchmark units,
+See the [miner guide](docs/miner.md) and [validator guide](docs/validator.md).
+Observation units are benchmark units,
 not a currency price. The default transcript mode uses historical label-derived
 hints; independent evaluation requires audio-derived observations or no transcript.
 
@@ -70,4 +70,4 @@ are declared in `pyproject.toml`.
 | `witness/score_v*.py` | Explicitly selected scoring versions |
 | `witness/recompose/`, `witness/sources/` | Validator-side scene preparation |
 | `tests/` | Public protocol and implementation checks |
-| `docs/` | Onboarding and contracts |
+| `docs/` | Miner and validator onboarding |
