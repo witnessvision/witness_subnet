@@ -28,6 +28,10 @@ class WitnessMiner:
     async def reconstruct(self, task: WitnessTask) -> dict[str, Any]:
         """Return an empty valid response. Replace with nonblocking inference.
 
+        Extension workflow: read task.task_spec, plan within task.budget, query
+        the assigned observation tools, and fill this schema from your evidence.
+        Keep inference in reconstruct(); forward() owns admission and deadlines.
+
         Use task.tool_base_url and task.session_id for observations. Never create
         a second session or access validator labels. Propagate cancellation and
         bound external requests by the task deadline.
