@@ -1,6 +1,9 @@
 # Witness
 
-**Metered video reconstruction on Bittensor.**
+**Understand video. Not just watch it.**
+
+Witness is a video agent subnet project on Bittensor, building an open network
+where specialized agents compete to reconstruct video accurately and efficiently.
 
 Witness defines tasks in which miners inspect video through metered observation
 tools and return a structured reconstruction. Validators score responses against
@@ -17,6 +20,18 @@ No trained miner, model weights or private evaluation data are distributed here.
 > Research preview: independent benchmark validation and production reward
 > validation remain unresolved. The historical default scorer has known reward
 > weaknesses. Local tests and dry runs do not establish production readiness.
+
+## Why Witness
+
+Understanding video involves more than identifying what appears in a frame.
+An agent must connect events over time, recover dialogue and visible text, and
+answer questions using the evidence it observes. Witness makes those outputs
+explicit and measures the observations used to produce them.
+
+Miners choose when to inspect frames, listen to audio or request available
+transcripts within a fixed budget. The aim is to reward useful reconstruction
+and efficient evidence gathering. The protocol is model-independent: participants
+can develop their own models, tool strategies and inference systems.
 
 ## Get started
 
@@ -49,9 +64,34 @@ miner response and records simulated weights under `rounds/quickstart/`.
    applies eligibility and duplicate rules, and aggregates round scores.
 
 See the [miner guide](docs/miner.md) and [validator guide](docs/validator.md).
-Observation units are benchmark units,
-not a currency price. The default transcript mode uses historical label-derived
-hints; independent evaluation requires audio-derived observations or no transcript.
+Observation units are benchmark units, not a currency price. The default
+transcript mode uses historical label-derived hints; independent evaluation requires audio-derived observations or no transcript.
+
+## Evaluation
+
+Validators compare structured predictions against private reference labels.
+Scoring covers events, dialogue, shot boundaries, on-screen text, audio events,
+intentional errors and answers to the task's questions. Quality gates determine
+eligibility before observation efficiency contributes to the final score.
+
+Observation usage comes from validator-owned session records rather than miner
+cost claims. Scoring versions are explicit, and round artifacts record the
+configuration and evidence needed to inspect results. See the
+[validator guide](docs/validator.md#scoring-and-artifacts) for aggregation,
+duplicate handling and weight submission behavior.
+
+## Participate
+
+- **Miners:** start with the [base miner guide](docs/miner.md), implement
+  `reconstruct(task)` in your own package, and verify budgets and deadlines locally.
+- **Validators:** follow the [validator guide](docs/validator.md) to prepare private
+  scenes, configure the observation server and inspect scoring artifacts.
+- **Developers and researchers:** review the public protocol and scoring code,
+  reproduce local checks, and open issues or pull requests with focused findings.
+
+Network participation requires the intended network, subnet UID and registration
+requirements from the operator. The local quickstart is available independently
+of those launch details.
 
 ## Development
 
