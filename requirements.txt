@@ -1,0 +1,2 @@
+# Install public package dependencies from pyproject.toml.
+-e .

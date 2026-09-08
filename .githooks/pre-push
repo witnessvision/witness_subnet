@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Reject wrong Witness authentication, destination or outgoing commit identities."""
+import pathlib
+import subprocess
+import sys
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True).strip()
+
+def fail(message):
+    sys.exit("Witness push blocked: " + message)
+
+identity = "techwhiz-semantha"
+email = "179846318+techwhiz-semantha@users.noreply.github.com"
+expected = "git@github.com:witnessvision/witness_subnet.git"
+if len(sys.argv) != 3 or sys.argv[2] != expected:
+    fail("unexpected destination")
+if git("config", "user.name") != identity or git("config", "user.email") != email:
+    fail("incorrect configured identity")
+expected_ssh = "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/witness"
+import os
+if os.environ.get("GIT_SSH_COMMAND") or os.environ.get("GIT_SSH") or git("config", "core.sshCommand") != expected_ssh:
+    fail("SSH routing differs from the dedicated Witness key")
+probe = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15", "-i", str(pathlib.Path.home()/".ssh/witness"), "git@github.com"], capture_output=True, text=True)
+if "Hi techwhiz-semantha! You've successfully authenticated" not in probe.stdout + probe.stderr:
+    fail("SSH account could not be verified")
+for line in sys.stdin:
+    local_ref, local_sha, remote_ref, remote_sha = line.split()
+    if set(local_sha) == {"0"}:
+        fail("branch deletion requires separate review")
+    revision = local_sha if set(remote_sha) == {"0"} else remote_sha + ".." + local_sha
+    for sha in git("rev-list", revision).splitlines():
+        paths = git("ls-tree", "-r", "--name-only", sha).splitlines()
+        blocked = ("witness/miner/", "witness/train/", "witness/eval/", "scripts/",
+                   "data/", "reports/", "web/", ".private/", ".codex/")
+        if any(path.startswith(blocked) or path in {"witness/bench.py", "witness/benchmark_v18.py"}
+               or path.startswith("requirements-") for path in paths):
+            fail("private miner or research artifacts in outgoing history")
+        actual = git("show", "-s", "--format=%an%n%ae%n%cn%n%ce", sha).splitlines()
+        if actual != [identity, email, identity, email]:
+            fail("wrong author or committer in " + sha[:12])

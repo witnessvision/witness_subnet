@@ -1,0 +1,77 @@
+# Local environment and build products
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+/dist/
+/build/
+
+# Project credentials
+.env
+
+# Private datasets, caches, sessions and historical scratch
+/data/*
+!/data/public_split.json
+!/data/README.md
+
+# Generated benchmark and validator output
+/reports/bench/
+/rounds/
+/reports/launch/round-smoke/
+/reports/launch/dev-e2e/
+/reports/launch/v16-smoke/
+/reports/launch/screenshots/
+/reports/launch/replacement-run/
+/reports/launch/source-review/
+/reports/launch/local-miner-e2e/
+*.log
+
+# Output names still present in archived commands
+/out/
+/out_real*/
+/bench/
+/.sprint2/
+/.witness_sessions/
+/corpus_gen_*.status
+
+# Separate web repository and private research artifacts
+/web/
+/reports/
+/knowledge/
+/goal.md
+/progress.md
+/docs/archive/
+/data/
+
+/docs/launch.md
+/docs/README.md
+/deploy/
+/configs/
+/scripts/README.md
+
+# Local provider and SSH operations
+/scripts/pod/backup_results.py
+/scripts/pod/deadline_stop.py
+/scripts/pod/fetch_base.py
+/scripts/pod/inspect_startup.py
+/scripts/pod/lora_qwen.py
+/scripts/pod/pod_setup.sh
+/scripts/pod/restore_runtime.sh
+/scripts/pod/serve_ft.sh
+/scripts/pod/smoke_stop.py
+/scripts/pod/train_devclean.sh
+/scripts/pod/vqa_eval.py
+/scripts/training/coordinate-window-eval100.py
+/scripts/training/overfit-gpu-guard.py
+/scripts/training/queue-overfit-1000.py
+/scripts/training/watch-overfit-pilot.py
+/scripts/training/watch-window-pilot.py
+
+# Private miner repository and migration backups
+/.private/
+/.codex/
+# Local tooling retained outside the public subnet package
+/scripts/
+/requirements-*.txt
+/requirements-*.lock

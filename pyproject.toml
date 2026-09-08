@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "witness-subnet"
+version = "0.1.0"
+description = "Witness metered video-reconstruction Bittensor subnet"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bittensor==10.5.0",
+    "fastapi==0.141.1",
+    "httpx==0.28.1",
+    "numpy==2.4.6",
+    "Pillow==12.3.0",
+    "PyYAML==6.0.2",
+    "typer>=0.12,<1",
+    "uvicorn==0.52.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+sources = ["yt-dlp==2026.8.19"]
+
+[project.scripts]
+witness-validator = "witness.subnet.validator:app"
+witness-miner = "witness.subnet.miner:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["witness*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
