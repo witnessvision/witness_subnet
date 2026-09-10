@@ -29,6 +29,10 @@ with `.venv/bin/python -m pip install .`. Preserve existing round history. If an
 upgrade changes the scoring identity, use a fresh `--round-root`; do not edit
 an old EMA identity to make the check pass.
 
+Aggregation 1.1.0 changes the history format. When upgrading from the original
+single-round EMA, reconcile the old `weight-submission.json`, keep the old directory,
+and use a fresh `--round-root rounds/mainnet-v1.1`. Do not relabel the old EMA file.
+
 ## 2. Check one round without changing weights
 
 Replace `MY_WALLET`, `MY_HOTKEY` and `PUBLIC_IP`. Open inbound TCP 8765 in your
@@ -80,7 +84,8 @@ for the next epoch instead of repeatedly querying miners.
   Each miner receives one task at a time, with a 180-second response deadline.
 - Provides frames and audio. No transcript is supplied; miners may transcribe the
   audio themselves. The preset never exposes label-derived transcript hints.
-- Uses scorer 1.0.0, EMA alpha 0.3, and a 70% burn  / 30% winner-takes-all allocation.
+- Uses scorer 1.0.0 and aggregation 1.1.0: mean reward over the last five rounds,
+  followed by EMA alpha 0.1, with a 70% burn / 30% winner-takes-all allocation.
 - Selects the highest EMA among miners with positive reward in the current round.
   Exact ties use lowest UID. The registered owner burn target is discovered from
   the chain and cannot compete. If every miner has zero current-round reward,
@@ -90,8 +95,27 @@ for the next epoch instead of repeatedly querying miners.
 - Verifies the Finney chain, validator permit, owner burn destination and weight
   constraints. It checks miner hotkeys again before submitting.
 
-`--mainnet` fixes these settings so operators use the same policy. Use the
-advanced CLI without `--mainnet` for other configurations. Scorer version and
+The round window and EMA alpha are configurable with `--score-window 5 --ema-alpha 0.1`
+(or `WITNESS_SCORE_WINDOW` and `WITNESS_EMA_ALPHA`). Operators should agree on the
+same values. Changing either requires a new round root, preserving previous evidence.
+
+For each miner, let `m` be the mean of its last N round rewards. During startup,
+average only the rounds observed so far; zero and missing-response rounds count.
+EMA stays zero until the first positive `m`, which initializes EMA directly as a
+quick start. Afterward, `EMA = 0.1 * m + 0.9 * previous_EMA`. For example, round
+rewards `0, 0, 0.9` initialize EMA at `0.3`, rather than `0.03` or zero. This does
+not discard the first positive reward. The N-round window bounds raw samples;
+EMA still retains influence from older rounds. Smoothing reduces reactions to
+individual rounds but increases response lag and cannot eliminate winner changes.
+
+History survives restarts. A temporarily unadvertised miner receives zero samples;
+returning does not erase its history. A replacement hotkey cannot inherit another
+miner's history. `round.json` records the current reward, window mean, EMA,
+observed window length and aggregation identity. Current-round eligibility and
+the all-zero full-burn rule still apply after smoothing.
+
+`--mainnet` fixes the remaining settings. Use the advanced CLI without `--mainnet`
+for other configurations. Scorer version and
 synthetic-corpus coverage are distinct: this preset runs the current generated
 workload; it is not proof of performance on independent real-world videos.
 

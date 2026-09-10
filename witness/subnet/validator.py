@@ -33,6 +33,7 @@ from witness.tools.server import Budget, create_app
 
 from .chain import BittensorChainAdapter, ChainAdapter, InMemoryChainAdapter, MinerEndpoint, WeightSubmission
 from .protocol import WitnessTask
+from .history import rolling_mean_ema
 
 
 DEFAULT_BUDGET: dict[str, int | float] = {
@@ -70,6 +71,7 @@ class ValidatorConfig:
     deadline_s: float = 180.0
     query_concurrency: int = 1
     ema_alpha: float = 0.3
+    score_window: int | None = None
     tool_host: str = "0.0.0.0"
     tool_port: int = 8765
     tool_public_url: str | None = None
@@ -109,6 +111,11 @@ class ValidatorConfig:
             raise ValueError("query_concurrency must be positive")
         if not 0 < self.ema_alpha <= 1:
             raise ValueError("ema_alpha must be in (0, 1]")
+        if self.score_window is not None and (
+            isinstance(self.score_window, bool) or not isinstance(self.score_window, int)
+            or self.score_window < 1
+        ):
+            raise ValueError("score_window must be a positive integer")
         if not 0 <= self.burn_rate <= 1:
             raise ValueError("burn_rate must be between zero and one")
         if self.weight_policy not in {"proportional", "winner-takes-all"}:
@@ -455,6 +462,16 @@ class WitnessValidator:
             hashlib.sha256(config.benchmark_lock.read_bytes()).hexdigest()
             if config.benchmark_lock is not None and config.benchmark_lock.is_file() else None
         )
+        self.aggregation_identity = {
+            "version": "1.1.0" if config.score_window is not None else "1.0.0",
+            "algorithm": "rolling_mean_ema" if config.score_window is not None else "ema",
+            "window_rounds": config.score_window,
+            "alpha": config.ema_alpha,
+            "bootstrap": "first_positive_mean" if config.score_window is not None else "first_round",
+        }
+        if config.score_window is not None:
+            self.aggregation_identity["code_sha256"] = hashlib.sha256(
+                Path(inspect.getfile(rolling_mean_ema)).read_bytes()).hexdigest()
 
     async def run_round(self) -> dict[str, Any]:
         submission_guard = self.config.round_root / "weight-submission.json"
@@ -467,7 +484,7 @@ class WitnessValidator:
         if endpoints is not None and self.config.burn_uid not in {e.uid for e in endpoints}:
             raise ValueError("winner-takes-all burn UID is missing from current endpoints")
         hotkeys = {str(e.uid): e.hotkey for e in endpoints} if endpoints is not None else None
-        previous = self._load_ema(hotkeys)
+        previous, previous_rounds, previous_hotkeys = self._load_score_state(hotkeys)
         block_hash = self.chain.current_block_hash()
         round_id = self._round_id(block_hash)
         round_dir = self.config.round_root.resolve() / f"round_{round_id}"
@@ -582,9 +599,18 @@ class WitnessValidator:
         apply_relative_gate(records, score_version=self.config.score_version)
         apply_duplicate_sharing(records)
         uids = [endpoint.uid for endpoint in endpoints]
+        # Missing/offline miners keep their history and receive a zero sample.
+        # Dropping an axon advertisement must not reset a miner's track record.
+        scored_uids = sorted(set(uids) | {int(uid) for uid in previous_rounds})
         round_scores, ema_scores, responders = aggregate_miner_scores(
-            uids, records, len(scenes), previous, self.config.ema_alpha
+            scored_uids, records, len(scenes), previous, self.config.ema_alpha
         )
+        window_scores = round_scores
+        round_history = {}
+        if self.config.score_window is not None:
+            window_scores, ema_scores, round_history = rolling_mean_ema(
+                round_scores, previous, previous_rounds,
+                window=self.config.score_window, alpha=self.config.ema_alpha)
         weights = build_weight_vector(
             uids,
             ema_scores,
@@ -597,6 +623,7 @@ class WitnessValidator:
         artifact = {
             "schema_version": "1.0",
             "scoring_identity": self.scoring_identity,
+            "aggregation_identity": self.aggregation_identity,
             "observation_budget": dict(self.config.budget),
             "round_id": round_id,
             "block_hash": block_hash,
@@ -623,6 +650,8 @@ class WitnessValidator:
                 str(uid): {
                     "metrics": summarize_records([record for record in records if int(record["uid"]) == uid]),
                     "round_score": round(round_scores[uid], 12),
+                    "window_score": round(window_scores[uid], 12),
+                    "window_rounds_observed": len(round_history.get(str(uid), [])),
                     "ema_score": round(ema_scores[uid], 12),
                     "responded": uid in responders,
                     "scenes": [record for record in records if int(record["uid"]) == uid],
@@ -634,7 +663,7 @@ class WitnessValidator:
                 "name": self.config.weight_policy,
                 "burn_uid": self.config.burn_uid,
                 "burn_rate": self.config.burn_rate,
-                **({"version": "1.0.0", "ranking": "ema", "eligibility": "responded_and_positive_round_reward",
+                **({"version": self.aggregation_identity["version"], "ranking": "ema", "eligibility": "responded_and_positive_round_reward",
                     "tie_break": "lowest_uid", "no_eligible_miner": "full_burn",
                     "winner_uid": next((uid for uid, weight in zip(uids, weights)
                                         if uid != self.config.burn_uid and weight > 0), None)}
@@ -662,7 +691,8 @@ class WitnessValidator:
         if guarded:
             self._write_json(submission_guard, {"round_id": round_id, "weight_submission": artifact["weight_submission"]})
         # EMA describes scored observations, independently of chain acceptance.
-        self._save_ema(ema_scores, hotkeys)
+        self._save_ema(ema_scores, {**previous_hotkeys, **hotkeys} if hotkeys is not None else None,
+                       round_history)
         artifact["ema_updated"] = True
         self._write_json(round_dir / "round.json", artifact)
         return artifact
@@ -768,29 +798,61 @@ class WitnessValidator:
     def _ema_path(self) -> Path:
         return self.config.round_root.resolve() / "ema.json"
 
-    def _load_ema(self, hotkeys: Mapping[str, str] | None = None) -> dict[str, float]:
+    def _load_score_state(self, hotkeys: Mapping[str, str] | None = None
+                          ) -> tuple[dict[str, float], dict[str, list[float]], dict[str, str]]:
         if not self._ema_path.is_file():
-            return {}
+            return {}, {}, {}
         raw = json.loads(self._ema_path.read_text(encoding="utf-8"))
-        scores = raw.get("scores", {}) if isinstance(raw, dict) else {}
-        identity = raw.get("scoring_identity") if isinstance(raw, dict) else None
+        if not isinstance(raw, dict) or not isinstance(raw.get("scores", {}), dict):
+            raise ValueError("Invalid persisted score state")
+        scores = raw.get("scores", {})
+        identity = raw.get("scoring_identity")
         legacy = self.config.score_version == "1.5" and self.config.transcript_source == "legacy_labels"
         if scores and identity != self.scoring_identity and not (identity is None and legacy):
             raise ValueError("EMA scoring identity differs; use a new round_root for the new scoring regime")
+        aggregation = raw.get("aggregation_identity")
+        if scores and aggregation != self.aggregation_identity and not (
+            aggregation is None and self.config.score_window is None
+        ):
+            raise ValueError("EMA aggregation identity differs; use a new round_root for the new aggregation")
+        history = raw.get("round_scores", {})
+        previous_hotkeys = raw.get("hotkeys", {})
+        if not isinstance(history, dict) or not isinstance(previous_hotkeys, dict):
+            raise ValueError("Invalid persisted round history")
+        if self.config.score_window is not None:
+            if set(scores) != set(history) or any(
+                not isinstance(values, list) or not 1 <= len(values) <= self.config.score_window
+                for values in history.values()
+            ):
+                raise ValueError("Invalid persisted round history")
+            try:
+                history = {str(uid): [float(value) for value in samples]
+                           for uid, samples in history.items()}
+                scores = {str(uid): float(value) for uid, value in scores.items()}
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Invalid persisted reward value") from exc
+            values = [*scores.values(), *(v for samples in history.values() for v in samples)]
+            if any(not math.isfinite(value) or value < 0 for value in values):
+                raise ValueError("reward history must be finite and nonnegative")
         if hotkeys is not None:
-            previous_hotkeys = raw.get("hotkeys", {})
             # A re-registered UID must never inherit another hotkey's winning EMA.
-            scores = {uid: value for uid, value in scores.items()
-                      if uid in hotkeys and previous_hotkeys.get(uid) == hotkeys[uid]}
-        return {str(uid): float(value) for uid, value in scores.items()}
+            valid = {uid for uid in scores if previous_hotkeys.get(uid)
+                     and (uid not in hotkeys or previous_hotkeys[uid] == hotkeys[uid])}
+            scores = {uid: value for uid, value in scores.items() if uid in valid}
+            history = {uid: value for uid, value in history.items() if uid in valid}
+            previous_hotkeys = {uid: value for uid, value in previous_hotkeys.items() if uid in valid}
+        return ({str(uid): float(value) for uid, value in scores.items()}, history, previous_hotkeys)
 
-    def _save_ema(self, scores: Mapping[int, float], hotkeys: Mapping[str, str] | None = None) -> None:
+    def _save_ema(self, scores: Mapping[int, float], hotkeys: Mapping[str, str] | None = None,
+                  history: Mapping[str, list[float]] | None = None) -> None:
         self._write_json(
             self._ema_path,
             {
                 "schema_version": "1.0",
                 "alpha": self.config.ema_alpha,
                 "scoring_identity": self.scoring_identity,
+                "aggregation_identity": self.aggregation_identity,
+                "round_scores": dict(history or {}),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "scores": {str(uid): value for uid, value in scores.items()},
                 **({"hotkeys": dict(hotkeys)} if hotkeys is not None else {}),
@@ -835,7 +897,10 @@ def run(
     tool_port: int = typer.Option(8765, min=0, max=65535),
     tool_public_url: str | None = typer.Option(None, envvar="WITNESS_TOOL_PUBLIC_URL"),
     deadline_s: float = typer.Option(180.0, min=1),
-    ema_alpha: float = typer.Option(0.3, min=0.000001, max=1),
+    ema_alpha: float | None = typer.Option(None, min=0.000001, max=1, envvar="WITNESS_EMA_ALPHA",
+                                          help="EMA alpha: mainnet default 0.1, advanced default 0.3."),
+    score_window: int | None = typer.Option(None, min=1, envvar="WITNESS_SCORE_WINDOW",
+                                            help="Mean of the last N rounds before EMA; mainnet default 5."),
     burn_uid: int | None = typer.Option(None, envvar="WITNESS_BURN_UID"),
     burn_rate: float = typer.Option(0.0, min=0, max=1, envvar="WITNESS_BURN_RATE"),
     weight_policy: str = typer.Option("proportional", envvar="WITNESS_WEIGHT_POLICY",
@@ -873,7 +938,9 @@ def run(
         try:
             preset = mainnet_config(round_root=round_root if round_root != Path("rounds") else Path("rounds/mainnet-v1"),
                                     burn_uid=live.burn_uid, tool_host=tool_host, tool_port=tool_port,
-                                    tool_public_url=tool_public_url, set_weights_enabled=set_weights_enabled)
+                                    tool_public_url=tool_public_url, set_weights_enabled=set_weights_enabled,
+                                    score_window=5 if score_window is None else score_window,
+                                    ema_alpha=0.1 if ema_alpha is None else ema_alpha)
             validator = WitnessValidator(live, preset)
             if once:
                 artifact = asyncio.run(validator.run_round())
@@ -911,7 +978,8 @@ def run(
         pool_manifest=pool_manifest,
         source_scenes=source_scenes,
         deadline_s=deadline_s,
-        ema_alpha=ema_alpha,
+        ema_alpha=0.3 if ema_alpha is None else ema_alpha,
+        score_window=score_window,
         tool_host="127.0.0.1" if dry_run else tool_host,
         tool_port=0 if dry_run else tool_port,
         tool_public_url=None if dry_run else tool_public_url,

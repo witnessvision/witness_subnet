@@ -35,7 +35,14 @@ the entire remaining 30% to one miner. The equivalent environment setting is
 `WITNESS_WEIGHT_POLICY=winner-takes-all`. Start verification with
 `--no-set-weights`; the allocation policy does not enable submissions.
 
-Policy v1.0.0 ranks by EMA of scored rewards. A winner must have a valid response
+The mainnet preset uses aggregation/weight policy v1.1.0: the mean of the last
+five round rewards, then an EMA with alpha 0.1. `--score-window` and `--ema-alpha`
+configure these values. The first positive window mean initializes the EMA
+directly; zero rounds count toward the mean. See the [validator guide](validator.md)
+for the formula, persisted history and upgrade instructions. Advanced mode without
+`--score-window` retains policy v1.0.0 and its single-round EMA.
+
+Both policies rank by EMA of scored rewards. A winner must have a valid response
 and positive mean reward in the current round as well as a positive EMA. The burn
 UID cannot win. Exact EMA ties go to the lowest UID, independently of query order.
 Nonresponders and miners with zero current reward cannot win using old scores.

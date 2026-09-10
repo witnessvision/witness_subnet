@@ -83,6 +83,7 @@ def test_preset_is_cpu_only_without_asr_or_hosted_generation(tmp_path):
     assert config.transcript_source == "none" and config.score_version == "1.0.0"
     assert config.weight_policy == "winner-takes-all" and config.burn_rate == .7
     assert config.epoch_aligned and not config.set_weights_enabled
+    assert config.score_window == 5 and config.ema_alpha == .1
 
 
 @pytest.mark.parametrize("args", [["--mainnet"], ["--mainnet", "--burn-only"], ["--mainnet", "--dry-run"]])

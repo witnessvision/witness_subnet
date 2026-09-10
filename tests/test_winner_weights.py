@@ -59,11 +59,11 @@ def test_ema_is_bound_to_hotkey_and_never_inherited_after_reregistration(tmp_pat
     v = WitnessValidator(InMemoryChainAdapter(), ValidatorConfig(
         round_root=tmp_path, weight_policy="winner-takes-all", burn_uid=240, burn_rate=0.7))
     v._save_ema({7: 0.9, 3: 0.1}, {"7": "old-key", "3": "stable-key"})
-    assert v._load_ema({"7": "new-key", "3": "stable-key"}) == {"3": 0.1}
+    assert v._load_score_state({"7": "new-key", "3": "stable-key"})[0] == {"3": 0.1}
     raw = json.loads(v._ema_path.read_text())
     del raw["hotkeys"]
     v._ema_path.write_text(json.dumps(raw))
-    assert v._load_ema({"7": "old-key"}) == {}
+    assert v._load_score_state({"7": "old-key"})[0] == {}
 
 
 def test_missing_burn_target_fails_before_preparing_scenes(tmp_path, monkeypatch):

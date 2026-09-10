@@ -80,7 +80,7 @@ class MainnetChainAdapter(BittensorChainAdapter):
 
 
 def mainnet_config(*, round_root, burn_uid, tool_host, tool_port, tool_public_url,
-                   set_weights_enabled):
+                   set_weights_enabled, score_window=5, ema_alpha=0.1):
     from .validator import ValidatorConfig
     return ValidatorConfig(
         round_root=round_root, scene_count=5, programmatic_share=1.0,
@@ -88,4 +88,5 @@ def mainnet_config(*, round_root, burn_uid, tool_host, tool_port, tool_public_ur
         burn_uid=burn_uid, burn_rate=.7, weight_policy="winner-takes-all",
         transcript_source="none", allow_unlocked=True, epoch_aligned=True,
         query_concurrency=4, set_weights_enabled=set_weights_enabled,
+        score_window=score_window, ema_alpha=ema_alpha,
     )
