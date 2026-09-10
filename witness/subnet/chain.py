@@ -94,6 +94,22 @@ class BittensorChainAdapter:
             raise RuntimeError("subtensor substrate does not expose get_block_hash")
         return str(substrate.get_block_hash(block))
 
+    def epoch_state(self) -> dict[str, Any]:
+        substrate = self.subtensor.substrate
+        block_hash = substrate.get_chain_finalised_head()
+        block = substrate.get_block_number(block_hash)
+        def read(name: str) -> int:
+            value = substrate.query("SubtensorModule", name, [self.netuid], block_hash=block_hash).value
+            if value is None:
+                raise RuntimeError(f"Missing epoch storage: {name}")
+            return int(value)
+        tempo, last, pending, epoch = (read(name) for name in
+            ("Tempo", "LastEpochBlock", "PendingEpochAt", "SubnetEpochIndex"))
+        next_block = min(last + tempo, pending) if pending else last + tempo
+        return {"netuid": self.netuid, "block": block, "block_hash": block_hash,
+                "epoch_index": epoch, "last_epoch_block": last, "tempo": tempo,
+                "pending_epoch_at": pending, "next_epoch_block": next_block if tempo else None}
+
     def miner_endpoints(self) -> list[MinerEndpoint]:
         self.metagraph.sync(subtensor=self.subtensor)
         uids = [int(value) for value in self.metagraph.uids.tolist()]

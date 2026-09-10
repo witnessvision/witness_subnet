@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import random
 import secrets
 import shutil
@@ -26,6 +27,8 @@ from witness.gen import generate
 from witness.recompose.generator import generate_recomposition
 from witness.score import score_reconstruction
 from witness.score.scorer import DEFAULT_Q_MIN
+from witness.reward import REWARD_VERSION, reward_metrics, summarize_records
+from witness.score_v1_0_0 import SCORER_VERSION, score_reconstruction as production_scorer
 from witness.tools.server import Budget, create_app
 
 from .chain import BittensorChainAdapter, ChainAdapter, InMemoryChainAdapter, MinerEndpoint, WeightSubmission
@@ -58,35 +61,42 @@ DEFAULT_LOCKED_SCENE_ROOT = REPOSITORY_ROOT / "data/scenes/hidden-v15"
 @dataclass(slots=True)
 class ValidatorConfig:
     round_root: Path = Path("rounds")
-    scene_count: int = 3
+    scene_count: int = 5
     programmatic_share: float = 0.25
     tiers: tuple[int, ...] = (1, 2, 3)
     pool_manifest: Path | None = None
     source_scenes: tuple[Path, ...] = ()
     budget: dict[str, int | float] = field(default_factory=lambda: dict(DEFAULT_BUDGET))
     deadline_s: float = 180.0
+    query_concurrency: int = 1
     ema_alpha: float = 0.3
     tool_host: str = "0.0.0.0"
     tool_port: int = 8765
     tool_public_url: str | None = None
     burn_uid: int | None = 0
     burn_rate: float = 0.0
+    weight_policy: str = "proportional"
+    set_weights_enabled: bool = True
     round_interval_s: float = 60.0
-    benchmark_lock: Path | None = DEFAULT_BENCHMARK_LOCK
+    epoch_aligned: bool = False
+    epoch_poll_s: float = 12.0
+    benchmark_lock: Path | None = None
     locked_scene_root: Path = DEFAULT_LOCKED_SCENE_ROOT
     allow_unlocked: bool = False
-    score_version: str = "1.5"
+    score_version: str = SCORER_VERSION
     transcript_source: str = "legacy_labels"
 
     def validate(self) -> None:
-        if self.score_version not in {"1.5", "1.6-candidate", "1.7-candidate", "1.8"}:
+        if self.score_version not in {SCORER_VERSION, "1.5", "1.6-candidate", "1.7-candidate", "1.8", REWARD_VERSION}:
             raise ValueError("unknown score_version")
-        if self.score_version != "1.5" and not self.allow_unlocked:
+        if self.score_version not in {SCORER_VERSION, "1.5"} and not self.allow_unlocked:
             raise ValueError("candidate scoring requires explicit allow_unlocked diagnostic mode")
         if self.transcript_source not in {"legacy_labels", "asr", "none"}:
             raise ValueError("unknown transcript_source")
         if self.transcript_source == "asr" and not self.source_scenes:
             raise ValueError("ASR rounds require source_scenes with precomputed observations")
+        if self.epoch_poll_s <= 0:
+            raise ValueError("Epoch poll interval must be positive")
         if self.scene_count < 1:
             raise ValueError("scene_count must be at least one")
         if not 0 <= self.programmatic_share <= 1:
@@ -95,10 +105,16 @@ class ValidatorConfig:
             raise ValueError("tiers must contain only 1, 2, or 3")
         if self.deadline_s <= 0:
             raise ValueError("deadline_s must be positive")
+        if self.query_concurrency < 1:
+            raise ValueError("query_concurrency must be positive")
         if not 0 < self.ema_alpha <= 1:
             raise ValueError("ema_alpha must be in (0, 1]")
         if not 0 <= self.burn_rate <= 1:
             raise ValueError("burn_rate must be between zero and one")
+        if self.weight_policy not in {"proportional", "winner-takes-all"}:
+            raise ValueError("unknown weight_policy")
+        if self.weight_policy == "winner-takes-all" and self.burn_uid is None:
+            raise ValueError("winner-takes-all requires an explicit burn UID")
         if self.tool_port < 0 or self.tool_port > 65535:
             raise ValueError("tool_port must be between 0 and 65535")
 
@@ -249,7 +265,7 @@ def reconstruction_hash(reconstruction: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def apply_relative_gate(records: list[dict[str, Any]]) -> None:
+def apply_relative_gate(records: list[dict[str, Any]], *, score_version: str = SCORER_VERSION) -> None:
     by_scene: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_scene.setdefault(str(record["scene_id"]), []).append(record)
@@ -273,6 +289,22 @@ def apply_relative_gate(records: list[dict[str, Any]]) -> None:
                 float(record["quality"]) * float(record["efficiency_factor"]) if passed else 0.0,
                 12,
             )
+            record["metrics"] = reward_metrics(
+                float(record["quality"]), float(record["efficiency_factor"]),
+                effective_threshold, valid=bool(record["responded"]),
+            )
+            if score_version in {SCORER_VERSION, REWARD_VERSION}:
+                record["score_before_duplicates"] = record["metrics"]["score"]
+                record["gate"].update(
+                    partial_floor=record["metrics"]["partial_floor"],
+                    reward_factor=record["metrics"]["reward_factor"],
+                )
+            else:
+                record["metrics"].update(partial_floor=effective_threshold,
+                                         reward_factor=float(passed))
+            # The recorded score follows the selected policy; diagnostics never
+            # substitute hypothetical shaped credit for historical rewards.
+            record["metrics"]["score"] = record["score_before_duplicates"]
 
 
 def apply_duplicate_sharing(records: list[dict[str, Any]]) -> None:
@@ -288,6 +320,8 @@ def apply_duplicate_sharing(records: list[dict[str, Any]]) -> None:
         for record in group:
             record["duplicate_count"] = count
             record["score"] = round(float(record["score_before_duplicates"]) / count, 12)
+            if "metrics" in record:
+                record["metrics"]["score"] = record["score"]
     for record in records:
         record.setdefault("duplicate_count", 0)
         record.setdefault("score", 0.0)
@@ -322,7 +356,29 @@ def build_weight_vector(
     *,
     burn_uid: int | None,
     burn_rate: float,
+    weight_policy: str = "proportional",
+    round_scores: Mapping[int, float] | None = None,
 ) -> list[float]:
+    if weight_policy not in {"proportional", "winner-takes-all"}:
+        raise ValueError("unknown weight_policy")
+    if weight_policy == "winner-takes-all":
+        if not 0 <= burn_rate <= 1 or burn_uid is None or burn_uid not in uids:
+            raise ValueError("winner-takes-all requires a valid burn rate and burn UID in the vector")
+        if len(set(uids)) != len(uids) or any(uid < 0 for uid in uids):
+            raise ValueError("weight UIDs must be unique and nonnegative")
+        if round_scores is None:
+            raise ValueError("winner-takes-all requires current round scores")
+        if any(not math.isfinite(float(value)) or float(value) < 0
+               for scores in (ema_scores, round_scores) for value in scores.values()):
+            raise ValueError("weight scores must be finite and nonnegative")
+        eligible = [uid for uid in uids if uid != burn_uid and uid in responders
+                    and ema_scores.get(uid, 0) > 0 and round_scores.get(uid, 0) > 0]
+        weights = [0.0] * len(uids)
+        weights[uids.index(burn_uid)] = burn_rate if eligible else 1.0
+        if eligible:
+            winner = min(eligible, key=lambda uid: (-ema_scores[uid], uid))
+            weights[uids.index(winner)] = 1.0 - burn_rate
+        return weights
     weights = [0.0] * len(uids)
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     positive = {
@@ -357,7 +413,9 @@ class WitnessValidator:
         self.config = config
         self.dry_scene_lookup = dry_scene_lookup
         self.scorer = score_reconstruction
-        if config.score_version == "1.6-candidate":
+        if config.score_version == SCORER_VERSION:
+            self.scorer = production_scorer
+        elif config.score_version == "1.6-candidate":
             from witness.score_v16 import score_reconstruction as scorer
             self.scorer = scorer
         elif config.score_version == "1.7-candidate":
@@ -365,6 +423,9 @@ class WitnessValidator:
             self.scorer = scorer
         elif config.score_version == "1.8":
             from witness.score_v18 import score_reconstruction as scorer
+            self.scorer = scorer
+        elif config.score_version == REWARD_VERSION:
+            from witness.score_v19 import score_reconstruction as scorer
             self.scorer = scorer
         self.scoring_identity = {
             "version": config.score_version,
@@ -375,9 +436,16 @@ class WitnessValidator:
                 **{name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
                    for name, path in (("contract", "witness/contract.py"), ("metering", "witness/tools/metering.py"))},
             },
-            "mode": "diagnostic" if config.allow_unlocked or config.score_version != "1.5" else "legacy",
+            "mode": "diagnostic" if config.allow_unlocked else (
+                "production" if config.score_version == SCORER_VERSION else "legacy"),
             "lock_verification": "required" if config.benchmark_lock is not None and not config.allow_unlocked else "disabled_or_diagnostic",
         }
+        if config.score_version in {SCORER_VERSION, REWARD_VERSION}:
+            self.scoring_identity["code_sha256"].update({
+                name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
+                for name, path in (("quality_v18", "witness/score_v18.py"),
+                                   ("reward", "witness/reward.py"))
+            })
         self.benchmark_lock = load_and_verify_benchmark_lock(
             config.benchmark_lock,
             config.locked_scene_root,
@@ -389,7 +457,17 @@ class WitnessValidator:
         )
 
     async def run_round(self) -> dict[str, Any]:
-        previous = self._load_ema()
+        submission_guard = self.config.round_root / "weight-submission.json"
+        guarded = self.config.weight_policy == "winner-takes-all" and self.config.set_weights_enabled
+        if guarded and submission_guard.exists():
+            prior_submission = json.loads(submission_guard.read_text())
+            if prior_submission["weight_submission"]["status"] not in {"finalized", "rejected", "simulated", "rate_limited"}:
+                raise RuntimeError("Unresolved weight submission; reconcile before another paid round")
+        endpoints = self.chain.miner_endpoints() if self.config.weight_policy == "winner-takes-all" else None
+        if endpoints is not None and self.config.burn_uid not in {e.uid for e in endpoints}:
+            raise ValueError("winner-takes-all burn UID is missing from current endpoints")
+        hotkeys = {str(e.uid): e.hotkey for e in endpoints} if endpoints is not None else None
+        previous = self._load_ema(hotkeys)
         block_hash = self.chain.current_block_hash()
         round_id = self._round_id(block_hash)
         round_dir = self.config.round_root.resolve() / f"round_{round_id}"
@@ -412,7 +490,8 @@ class WitnessValidator:
         })
         if self.dry_scene_lookup is not None:
             self.dry_scene_lookup.update({scene.scene_id: scene.directory for scene in scenes})
-        endpoints = self.chain.miner_endpoints()
+        if endpoints is None:
+            endpoints = self.chain.miner_endpoints()
         records: list[dict[str, Any]] = []
         started_at = datetime.now(timezone.utc).isoformat()
 
@@ -427,57 +506,60 @@ class WitnessValidator:
             for scene in scenes:
                 ordered = list(endpoints)
                 random.Random(f"{commitment_nonce}:{scene.scene_id}").shuffle(ordered)
-                for endpoint in ordered:
-                    session_id = tool_server.store.create(
-                        scene.scene_id, Budget(**self.config.budget)
-                    ).session_id
-                    task = WitnessTask(
-                        task_id=f"{round_id}:{scene.scene_id}:{endpoint.uid}",
-                        tool_base_url=tool_server.advertised_url,
-                        session_id=session_id,
-                        scene_id=scene.scene_id,
-                        seed_commitment=commitments[scene.scene_id],
-                        budget=dict(self.config.budget),
-                        task_spec=public_task_spec(scene.truth),
-                        deadline_s=self.config.deadline_s,
-                    )
-                    response: WitnessTask | None = None
-                    error: str | None = None
-                    try:
-                        response = await self.chain.query(
-                            endpoint, task, timeout=self.config.deadline_s
+                semaphore = asyncio.Semaphore(self.config.query_concurrency)
+
+                async def evaluate(endpoint: MinerEndpoint) -> dict[str, Any]:
+                    async with semaphore:
+                        session_id = tool_server.store.create(
+                            scene.scene_id, Budget(**self.config.budget)
+                        ).session_id
+                        task = WitnessTask(
+                            task_id=f"{round_id}:{scene.scene_id}:{endpoint.uid}",
+                            tool_base_url=tool_server.advertised_url,
+                            session_id=session_id,
+                            scene_id=scene.scene_id,
+                            seed_commitment=commitments[scene.scene_id],
+                            budget=dict(self.config.budget),
+                            task_spec=public_task_spec(scene.truth),
+                            deadline_s=self.config.deadline_s,
                         )
-                    except Exception as exc:  # one miner cannot abort the round
-                        error = f"{type(exc).__name__}: {exc}"
-                    with tool_server.store.lock:
-                        completed_session = tool_server.store.sessions.pop(session_id)
-                        cost = completed_session.cost.as_dict()
-                    response_status = (
-                        response.trace_summary.get("status")
-                        if response is not None and isinstance(response.trace_summary, dict)
-                        else None
-                    )
-                    responded = response is not None and response_status not in {
-                        "busy",
-                        "deadline_exceeded",
-                        "error",
-                        "degraded",
-                    }
-                    if response is not None and not responded and error is None:
-                        error = f"miner status: {response_status}"
-                    reconstruction = (
-                        response.reconstruction
-                        if response is not None and isinstance(response.reconstruction, dict)
-                        else {}
-                    )
-                    report = self.scorer(
-                        scene.truth,
-                        reconstruction,
-                        cost,
-                        q_min=ZERO_Q_MIN,
-                    )
-                    records.append(
-                        {
+                        response: WitnessTask | None = None
+                        error: str | None = None
+                        try:
+                            response = await asyncio.wait_for(
+                                self.chain.query(endpoint, task, timeout=self.config.deadline_s),
+                                timeout=self.config.deadline_s,
+                            )
+                        except Exception as exc:  # one miner cannot abort the round
+                            error = f"{type(exc).__name__}: {exc}"
+                        with tool_server.store.lock:
+                            completed_session = tool_server.store.sessions.pop(session_id)
+                            cost = completed_session.cost.as_dict()
+                        response_status = (
+                            response.trace_summary.get("status")
+                            if response is not None and isinstance(response.trace_summary, dict)
+                            else None
+                        )
+                        responded = response is not None and response_status not in {
+                            "busy",
+                            "deadline_exceeded",
+                            "error",
+                            "degraded",
+                        }
+                        if response is not None and not responded and error is None:
+                            error = f"miner status: {response_status}"
+                        reconstruction = (
+                            response.reconstruction
+                            if response is not None and isinstance(response.reconstruction, dict)
+                            else {}
+                        )
+                        report = self.scorer(
+                            scene.truth,
+                            reconstruction,
+                            cost,
+                            q_min=ZERO_Q_MIN,
+                        )
+                        return {
                             "uid": endpoint.uid,
                             "hotkey": endpoint.hotkey,
                             "scene_id": scene.scene_id,
@@ -494,9 +576,10 @@ class WitnessValidator:
                             "reconstruction": reconstruction,
                             "trace_summary": response.trace_summary if response else None,
                         }
-                    )
 
-        apply_relative_gate(records)
+                records.extend(await asyncio.gather(*(evaluate(endpoint) for endpoint in ordered)))
+
+        apply_relative_gate(records, score_version=self.config.score_version)
         apply_duplicate_sharing(records)
         uids = [endpoint.uid for endpoint in endpoints]
         round_scores, ema_scores, responders = aggregate_miner_scores(
@@ -508,6 +591,8 @@ class WitnessValidator:
             responders,
             burn_uid=self.config.burn_uid,
             burn_rate=self.config.burn_rate,
+            weight_policy=self.config.weight_policy,
+            round_scores=round_scores,
         )
         artifact = {
             "schema_version": "1.0",
@@ -536,6 +621,7 @@ class WitnessValidator:
             ],
             "miners": {
                 str(uid): {
+                    "metrics": summarize_records([record for record in records if int(record["uid"]) == uid]),
                     "round_score": round(round_scores[uid], 12),
                     "ema_score": round(ema_scores[uid], 12),
                     "responded": uid in responders,
@@ -544,14 +630,27 @@ class WitnessValidator:
                 for uid in uids
             },
             "weights": {"uids": uids, "values": [round(value, 12) for value in weights]},
-            "weight_submission": WeightSubmission("prepared").as_dict(),
+            "weight_policy": {
+                "name": self.config.weight_policy,
+                "burn_uid": self.config.burn_uid,
+                "burn_rate": self.config.burn_rate,
+                **({"version": "1.0.0", "ranking": "ema", "eligibility": "responded_and_positive_round_reward",
+                    "tie_break": "lowest_uid", "no_eligible_miner": "full_burn",
+                    "winner_uid": next((uid for uid, weight in zip(uids, weights)
+                                        if uid != self.config.burn_uid and weight > 0), None)}
+                   if self.config.weight_policy == "winner-takes-all" else {}),
+            },
+            "weight_submission": WeightSubmission("prepared" if self.config.set_weights_enabled else "disabled").as_dict(),
             "ema_updated": False,
         }
         # Preserve the scored round and submission intent before network I/O.
         # A crash here leaves an explicit unresolved intent, not a lost round.
         self._write_json(round_dir / "round.json", artifact)
+        if guarded:
+            self._write_json(submission_guard, {"round_id": round_id, "weight_submission": artifact["weight_submission"]})
         try:
-            submission = self.chain.set_weights(uids, weights)
+            submission = (self.chain.set_weights(uids, weights) if self.config.set_weights_enabled
+                          else WeightSubmission("disabled"))
             if not isinstance(submission, WeightSubmission):
                 raise TypeError("chain adapter returned no submission evidence")
         except Exception as exc:
@@ -560,13 +659,20 @@ class WitnessValidator:
             submission = WeightSubmission("unknown", error_type=type(exc).__name__)
         artifact["weight_submission"] = submission.as_dict()
         self._write_json(round_dir / "round.json", artifact)
+        if guarded:
+            self._write_json(submission_guard, {"round_id": round_id, "weight_submission": artifact["weight_submission"]})
         # EMA describes scored observations, independently of chain acceptance.
-        self._save_ema(ema_scores)
+        self._save_ema(ema_scores, hotkeys)
         artifact["ema_updated"] = True
         self._write_json(round_dir / "round.json", artifact)
         return artifact
 
     async def run_forever(self) -> None:
+        if self.config.epoch_aligned:
+            from .scheduling import run_epoch_rounds
+            await run_epoch_rounds(self.chain, self.run_round, self.config.round_root / "epoch-state.json",
+                                   poll_interval_s=self.config.epoch_poll_s)
+            return
         while True:
             try:
                 await self.run_round()
@@ -662,7 +768,7 @@ class WitnessValidator:
     def _ema_path(self) -> Path:
         return self.config.round_root.resolve() / "ema.json"
 
-    def _load_ema(self) -> dict[str, float]:
+    def _load_ema(self, hotkeys: Mapping[str, str] | None = None) -> dict[str, float]:
         if not self._ema_path.is_file():
             return {}
         raw = json.loads(self._ema_path.read_text(encoding="utf-8"))
@@ -671,9 +777,14 @@ class WitnessValidator:
         legacy = self.config.score_version == "1.5" and self.config.transcript_source == "legacy_labels"
         if scores and identity != self.scoring_identity and not (identity is None and legacy):
             raise ValueError("EMA scoring identity differs; use a new round_root for the new scoring regime")
+        if hotkeys is not None:
+            previous_hotkeys = raw.get("hotkeys", {})
+            # A re-registered UID must never inherit another hotkey's winning EMA.
+            scores = {uid: value for uid, value in scores.items()
+                      if uid in hotkeys and previous_hotkeys.get(uid) == hotkeys[uid]}
         return {str(uid): float(value) for uid, value in scores.items()}
 
-    def _save_ema(self, scores: Mapping[int, float]) -> None:
+    def _save_ema(self, scores: Mapping[int, float], hotkeys: Mapping[str, str] | None = None) -> None:
         self._write_json(
             self._ema_path,
             {
@@ -682,6 +793,7 @@ class WitnessValidator:
                 "scoring_identity": self.scoring_identity,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "scores": {str(uid): value for uid, value in scores.items()},
+                **({"hotkeys": dict(hotkeys)} if hotkeys is not None else {}),
             },
         )
 
@@ -713,7 +825,7 @@ def run(
     wallet_name: str = typer.Option("default", "--wallet", envvar="WITNESS_WALLET"),
     wallet_hotkey: str = typer.Option("default", "--hotkey", envvar="WITNESS_HOTKEY"),
     wallet_path: str | None = typer.Option(None, envvar="WITNESS_WALLET_PATH"),
-    scenes: int = typer.Option(3, min=1),
+    scenes: int = typer.Option(5, min=1),
     programmatic_share: float = typer.Option(0.25, min=0, max=1),
     tiers: str = typer.Option("1,2,3"),
     pool_manifest: Path | None = typer.Option(None, exists=True, dir_okay=False),
@@ -724,21 +836,70 @@ def run(
     tool_public_url: str | None = typer.Option(None, envvar="WITNESS_TOOL_PUBLIC_URL"),
     deadline_s: float = typer.Option(180.0, min=1),
     ema_alpha: float = typer.Option(0.3, min=0.000001, max=1),
-    burn_uid: int | None = typer.Option(0),
-    burn_rate: float = typer.Option(0.0, min=0, max=1),
+    burn_uid: int | None = typer.Option(None, envvar="WITNESS_BURN_UID"),
+    burn_rate: float = typer.Option(0.0, min=0, max=1, envvar="WITNESS_BURN_RATE"),
+    weight_policy: str = typer.Option("proportional", envvar="WITNESS_WEIGHT_POLICY",
+                                      help="proportional or winner-takes-all; ranked by eligible EMA."),
+    burn_only: bool = typer.Option(False, "--burn-only", envvar="WITNESS_BURN_ONLY",
+                                   help="Send 100% weight to an owner burn UID; skip inference and scoring."),
+    set_weights_enabled: bool = typer.Option(True, "--set-weights/--no-set-weights",
+                                             envvar="WITNESS_SET_WEIGHTS",
+                                             help="Disable all weight submissions while retaining calculations."),
     interval_s: float = typer.Option(60.0, min=0),
-    benchmark_lock: Path | None = typer.Option(DEFAULT_BENCHMARK_LOCK, dir_okay=False),
+    epoch_aligned: bool = typer.Option(False, "--epoch-aligned", envvar="WITNESS_EPOCH_ALIGNED"),
+    epoch_poll_s: float = typer.Option(12.0, min=1),
+    benchmark_lock: Path | None = typer.Option(None, dir_okay=False),
     locked_scene_root: Path = typer.Option(DEFAULT_LOCKED_SCENE_ROOT, file_okay=False),
     allow_unlocked: bool = typer.Option(
         False,
         help="Continue despite a present benchmark lock mismatch",
     ),
     dry_run: bool = typer.Option(False, help="Use the local base miner and no chain"),
-    score_version: str = typer.Option("1.5", help="1.5, 1.6-candidate, 1.7-candidate or 1.8"),
+    mainnet: bool = typer.Option(False, "--mainnet", envvar="WITNESS_MAINNET",
+                                help="CPU-only SN20 preset: five fresh scenes, 70% burn / 30% one winner per epoch."),
+    score_version: str = typer.Option(SCORER_VERSION, help="Production 1.0.0; historical 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
     transcript_source: str = typer.Option("legacy_labels", help="legacy_labels, asr or none"),
     once: bool = typer.Option(False, help="Run one round and exit"),
 ) -> None:
     """Run continuous rounds, or one complete local round with --dry-run."""
+    if mainnet:
+        if burn_only or dry_run:
+            raise typer.BadParameter("--mainnet cannot be combined with --burn-only or --dry-run")
+        if not tool_public_url:
+            raise typer.BadParameter("--tool-public-url is required for mainnet")
+        from .mainnet import MainnetChainAdapter, mainnet_config
+        live = MainnetChainAdapter(netuid=20, network=network, wallet_name=wallet_name,
+                                   wallet_hotkey=wallet_hotkey, wallet_path=wallet_path)
+        try:
+            preset = mainnet_config(round_root=round_root if round_root != Path("rounds") else Path("rounds/mainnet-v1"),
+                                    burn_uid=live.burn_uid, tool_host=tool_host, tool_port=tool_port,
+                                    tool_public_url=tool_public_url, set_weights_enabled=set_weights_enabled)
+            validator = WitnessValidator(live, preset)
+            if once:
+                artifact = asyncio.run(validator.run_round())
+                typer.echo(json.dumps({"round_id": artifact["round_id"], "weights": artifact["weights"],
+                                       "weight_submission": artifact["weight_submission"]}))
+            else:
+                asyncio.run(validator.run_forever())
+        finally:
+            live.close()
+        return
+    if burn_only:
+        if dry_run:
+            raise typer.BadParameter("--burn-only cannot be combined with --dry-run")
+        from .burn import run_full_burn
+
+        chain = BittensorChainAdapter(
+            netuid=netuid, network=network, wallet_name=wallet_name,
+            wallet_hotkey=wallet_hotkey, wallet_path=wallet_path, with_dendrite=False,
+        )
+        try:
+            asyncio.run(run_full_burn(chain, state_path=round_root / "burn-state.json",
+                                     burn_uid=burn_uid, interval_s=interval_s, once=once,
+                                     set_weights_enabled=set_weights_enabled))
+        finally:
+            chain.close()
+        return
     source_scenes = tuple(scene or ())
     if dry_run and not source_scenes:
         source_scenes = (Path("data/scenes/synthetic/scene_101"), Path("data/scenes/synthetic/scene_202"))
@@ -754,9 +915,13 @@ def run(
         tool_host="127.0.0.1" if dry_run else tool_host,
         tool_port=0 if dry_run else tool_port,
         tool_public_url=None if dry_run else tool_public_url,
-        burn_uid=burn_uid,
+        burn_uid=0 if burn_uid is None else burn_uid,
         burn_rate=burn_rate,
+        weight_policy=weight_policy,
+        set_weights_enabled=set_weights_enabled,
         round_interval_s=interval_s,
+        epoch_aligned=epoch_aligned,
+        epoch_poll_s=epoch_poll_s,
         benchmark_lock=benchmark_lock,
         locked_scene_root=locked_scene_root,
         allow_unlocked=allow_unlocked,

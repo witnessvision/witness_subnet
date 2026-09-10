@@ -27,7 +27,7 @@ from witness.subnet.validator import (
 def test_relative_gate_cannot_weaken_frozen_absolute_minimum():
     rows = [{"scene_id": "dev", "tier": 1, "responded": True,
              "quality": .63, "efficiency_factor": .9}]
-    apply_relative_gate(rows)
+    apply_relative_gate(rows, score_version="1.5")
     assert rows[0]["gate"]["threshold"] == .7
     assert not rows[0]["gate"]["passed"]
     assert rows[0]["score_before_duplicates"] == 0
@@ -230,6 +230,7 @@ def test_full_dry_run_round_relative_gate_duplicates_ema_and_weights(tmp_path: P
     validator = WitnessValidator(
         chain,
         ValidatorConfig(
+            score_version="1.5",
             round_root=round_root,
             scene_count=2,
             source_scenes=(source_a, source_b),

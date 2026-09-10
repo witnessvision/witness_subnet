@@ -10,16 +10,17 @@ tools and return a structured reconstruction. Validators score responses against
 private reference labels and aggregate eligible scores into network weights.
 
 [Website](https://witnessvision.io/) ·
-[Base miner](docs/miner.md) · [Validator guide](docs/validator.md)
+[Base miner](docs/miner.md) · [Validator setup: CPU, no API key](docs/validator.md)
 
 This repository contains the public protocol, validator, observation API, scoring
 code, synthetic scene utilities and a minimal base miner. The base miner returns
 an empty reconstruction; implement your own inference in a separate package.
 No trained miner, model weights or private evaluation data are distributed here.
 
-> Research preview: independent benchmark validation and production reward
-> validation remain unresolved. The historical default scorer has known reward
-> weaknesses. Local tests and dry runs do not establish production readiness.
+The production scoring contract is **Witness Scorer v1.0.0**, the validator's
+default. It preserves the rules first exercised on mainnet as `1.9-candidate`.
+Independent benchmark validation and competitive miner quality remain separate
+from the release version; local tests and diagnostic rounds do not establish them.
 
 ## Why Witness
 
@@ -51,7 +52,8 @@ python3 -m venv .venv
 Use a fresh output directory when generating scenes. The local round needs no
 wallet, GPU, provider credential or chain connection. It scores an empty base
 miner response and records simulated weights under `rounds/quickstart/`.
-`--allow-unlocked` permits a generated diagnostic fixture without a private lock.
+`--allow-unlocked` labels this generated fixture round as diagnostic. Benchmark
+locks are optional and selected explicitly with `--benchmark-lock`.
 
 ## Protocol
 
@@ -64,8 +66,8 @@ miner response and records simulated weights under `rounds/quickstart/`.
    applies eligibility and duplicate rules, and aggregates round scores.
 
 See the [miner guide](docs/miner.md) and [validator guide](docs/validator.md).
-Observation units are benchmark units, not a currency price. The default
-transcript mode uses historical label-derived hints; independent evaluation requires audio-derived observations or no transcript.
+Observation units are benchmark units, not a currency price. The mainnet preset
+provides frames and audio without label-derived transcript hints.
 
 ## Evaluation
 
@@ -74,24 +76,31 @@ Scoring covers events, dialogue, shot boundaries, on-screen text, audio events,
 intentional errors and answers to the task's questions. Quality gates determine
 eligibility before observation efficiency contributes to the final score.
 
+Round reports also expose reconstruction quality, quality times efficiency,
+threshold pass rates and component scores by difficulty, including failed scenes
+in the denominator. Production scorer `1.0.0` includes a narrow partial-credit
+band below the full-credit thresholds; historical scoring remains available.
+See [the production scoring contract](docs/scoring.md#production-scorer-v100)
+for selection and offline comparison of saved rounds.
+
 Observation usage comes from validator-owned session records rather than miner
 cost claims. Scoring versions are explicit, and round artifacts record the
 configuration and evidence needed to inspect results. See the
-[validator guide](docs/validator.md#scoring-and-artifacts) for aggregation,
+[validator guide](docs/scoring.md#scoring-and-artifacts) for aggregation,
 duplicate handling and weight submission behavior.
 
 ## Participate
 
 - **Miners:** start with the [base miner guide](docs/miner.md), implement
   `reconstruct(task)` in your own package, and verify budgets and deadlines locally.
-- **Validators:** follow the [validator guide](docs/validator.md) to prepare private
-  scenes, configure the observation server and inspect scoring artifacts.
+- **Validators:** follow the [CPU-only SN20 setup](docs/validator.md). No GPU or
+  OpenAI/API key is needed. `--mainnet` prepares scenes automatically and applies
+  70% burn / 30% winner-takes-all weights.
 - **Developers and researchers:** review the public protocol and scoring code,
   reproduce local checks, and open issues or pull requests with focused findings.
 
-Network participation requires the intended network, subnet UID and registration
-requirements from the operator. The local quickstart is available independently
-of those launch details.
+Mainnet is Finney SN20. Network validation requires a registered hotkey with a
+validator permit; the local quickstart works without a wallet or chain connection.
 
 ## Development
 

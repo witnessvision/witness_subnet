@@ -1,107 +1,118 @@
-# Witness validator
+# Run a Witness validator
 
-The validator generates or copies a private scene batch, starts the metered tool
-server, opens one session per miner and scene, sends `WitnessTask` synapses, and
-sets weights from the EMA of round scores. Video bytes and `scene.json` never
-enter the synapse. Only duration, fps, tier, QA IDs/questions, budget, the opaque
-scene/session IDs, and the tool URL are public.
+Witness validates on **Bittensor Finney, subnet 20**. The validator needs **CPU
+only**: no GPU, CUDA, OpenAI account, API key or model download. It generates
+video/audio locally with FFmpeg and eSpeak NG, serves metered observations to
+miners, and scores their JSON responses with **Witness Scorer v1.0.0**.
+Miners provide their own inference. The validator does not run a miner.
 
-## Prerequisites and local verification
+You need a Linux server with Python 3.11+, a registered SN20 hotkey with a validator
+permit, and a public TCP port for observations. The operator deployment uses
+6 vCPU / 12 GB RAM; load depends on the number of responding miners. Keep the coldkey
+private key off the validator server; use your established wallet access method.
 
-Complete the [local quickstart](../README.md#get-started), including its generated scene and
-no-chain round with the empty base miner. Dependencies are declared in `pyproject.toml`.
+## 1. Install
 
-For network operation, obtain the intended network, subnet UID, registration
-requirements and approved scoring configuration from the subnet operator.
-Configure a validator wallet hotkey, private scene storage and a tool endpoint
-reachable by miners. This research preview does not establish production reward
-readiness. CLI defaults are not a public deployment announcement.
-
-## Network configuration
-
-Set `WITNESS_NETUID`, `WITNESS_NETWORK`, `WITNESS_WALLET` and `WITNESS_HOTKEY`
-for the intended network. The principal operator settings are:
-
-| Setting | Purpose |
-| --- | --- |
-| `--tool-host`, `--tool-port` | Observation server bind address and port |
-| `--tool-public-url` / `WITNESS_TOOL_PUBLIC_URL` | Miner-reachable observation API URL |
-| `--scene` | Explicit scene directory; repeat for additional scenes |
-| `--pool-manifest` | Source manifest for recomposed scenes |
-| `--round-root` | Private round artifacts and scoring history |
-| `--deadline-s` | Per-task response deadline |
-| `--score-version` | Versioned scoring contract |
-| `--transcript-source` | `asr`, `none` or historical `legacy_labels` |
-| `--ema-alpha` | Current-round contribution to the moving average |
-| `--once` | Exit after one round |
-
-Inspect the complete interface before configuring a network round:
+On Ubuntu 24.04:
 
 ```bash
-.venv/bin/witness-validator --help
+sudo apt-get update
+sudo apt-get install -y git python3-venv ffmpeg espeak-ng
+git clone https://github.com/witnessvision/witness_subnet.git
+cd witness_subnet
+python3 -m venv .venv
+.venv/bin/python -m pip install .
 ```
 
-A public tool URL is required when binding a wildcard address. It must route to
-the configured tool port. The validator creates sessions locally; miners receive
-only their assigned session URLs. Private labels and round files must not be
-served through that endpoint.
+Already installed? Stop your validator, run `git pull --ff-only`, then reinstall
+with `.venv/bin/python -m pip install .`. Preserve existing round history. If an
+upgrade changes the scoring identity, use a fresh `--round-root`; do not edit
+an old EMA identity to make the check pass.
 
-Use validated scenes and a matching benchmark identity. Source recomposition can
-invoke a hosted speech service on a cache miss; configure credentials and a call
-cap before enabling that path. The local dry run makes no hosted model calls.
+## 2. Check one round without changing weights
 
-## Scoring and artifacts
+Replace `MY_WALLET`, `MY_HOTKEY` and `PUBLIC_IP`. Open inbound TCP 8765 in your
+provider/server firewall. The URL must be reachable from miners; it is not a
+Bittensor axon. Private labels and round files are not served through this API.
 
-For each session, validator cost is snapshotted from the server-owned store
-under its lock when the task closes. JSONL logs retain the audit trail. Miner
-cost claims are never used. The relative gate is:
-
-```text
-quality >= max(tier_minimum, 0.35, 0.8 * best_quality_for_scene)
-score = quality * efficiency_factor
+```bash
+.venv/bin/witness-validator --mainnet \
+  --wallet MY_WALLET --hotkey MY_HOTKEY \
+  --tool-public-url http://PUBLIC_IP:8765 \
+  --no-set-weights --once
 ```
 
-The frozen tier minima are 0.70 / 0.65 / 0.60 for tiers 1 / 2 / 3. A
-relative gate cannot weaken them. Degraded Observer responses receive no reward.
-Sessions are created directly by the validator store; the public tool server
-rejects `POST /session`. Sessions are removed when their task finishes.
+An existing wallet is read from `~/.bittensor/wallets`. Add `--wallet-path PATH`
+if needed, and `--network RPC_URL` to use your own Finney RPC. No `.env` file is
+required. Environment-based deployments can use `WITNESS_WALLET`,
+`WITNESS_HOTKEY`, `WITNESS_WALLET_PATH`, `WITNESS_NETWORK` and
+`WITNESS_TOOL_PUBLIC_URL`; export them through your existing service manager.
 
-Identical canonical reconstruction hashes from multiple UIDs divide each
-matching score by the number of UIDs sharing it. Scene scores are averaged, then
-folded into `ema.json`. Non-responders receive zero weight. Positive eligible
-EMA scores are normalized; the configured burn share is added to the burn UID.
-If no miner has a positive eligible score, the full vector goes to the valid burn
-UID (or remains zero if none is configured).
+Inspect `rounds/mainnet-v1/round_*/round.json`: the scorer should be `1.0.0`,
+`weight_policy.name` should be `winner-takes-all`, and submission status must
+be `disabled`. Miner responses, reward, winner and calculated weights are recorded
+there. Offline or incompatible miners can return zero; only eligible responses
+can win. This command makes real miner requests but submits no weights.
 
-Completed rounds are stored below `--round-root` as `round_<id>/round.json`.
-After scoring, the artifact records scene seeds, reports and a `prepared` weight
-submission before network I/O. It then records `simulated`, `submitted`,
-`included`, `finalized`, `rejected`, or `unknown` from the adapter evidence.
-The pinned SDK is asked to wait for inclusion/finalization with one attempt.
-A transport exception remains `unknown`; it is not safe to assume rejection
-or automatically rebroadcast it. Raw signing payloads and provider messages
-are not stored.
+## 3. Start validation
 
-Finalization of a commitment does not prove weights are active after reveal;
-`weights_applied` remains unknown until separately verified on chain. EMA stores
-scored observations independently of submission success. Private scenes and
-session logs remain under the round's `private/` directory.
+Stop any previous validator or burn-only process for this hotkey, including its
+service/timer. Remove `WITNESS_BURN_ONLY` and any `WITNESS_SET_WEIGHTS=0` setting.
+Run the same command without the two test flags:
 
-Metered cost is benchmark cost, not currency: visual patches, requested audio
-seconds, and returned transcript characters. The scorer's efficiency factor is
-`max(0, 1 - 0.30 * total_cost / cost_ref)`.
-## Scoring and observation identity
+```bash
+.venv/bin/witness-validator --mainnet \
+  --wallet MY_WALLET --hotkey MY_HOTKEY \
+  --tool-public-url http://PUBLIC_IP:8765
+```
 
-The default remains historical scoring 1.5. Local diagnostic rounds can select
-`--score-version 1.7-candidate --allow-unlocked`; this is not certification of the
-candidate scorer or corpus. `--transcript-source asr` requires explicitly supplied
-`--scene` directories with valid `observations/transcript.json` sidecars. Missing
-or stale observations fail before querying miners. `none` disables transcript
-evidence; `legacy_labels` retains the historical label-derived hints.
+**This command submits weights.** Keep it running through your existing systemd,
+PM2 or container supervisor. Use one writer per hotkey. The default persistent
+state is `rounds/mainnet-v1`; keep the working directory stable across restarts.
+Use `--round-root PATH` for another private writable state directory. The process
+records an epoch heartbeat in `epoch-state.json`. If an epoch round fails, it waits
+for the next epoch instead of repeatedly querying miners.
 
-Round artifacts record the scorer, validator, contract and metering hashes, the
-benchmark-lock hash when present, observation budget and per-scene media/label/ASR
-hashes. EMA files carry the same scoring identity. Changing it requires a fresh
-round root; the validator refuses to blend incompatible reward histories before
-creating a round or querying miners. Legacy unversioned EMA files remain readable
-only with the historical 1.5/legacy-label configuration.
+## What the mainnet preset does
+
+- Generates five fresh private synthetic scenes per finalized subnet epoch.
+- Evaluates every advertised, serving non-owner miner, up to four simultaneously.
+  Each miner receives one task at a time, with a 180-second response deadline.
+- Provides frames and audio. No transcript is supplied; miners may transcribe the
+  audio themselves. The preset never exposes label-derived transcript hints.
+- Uses scorer 1.0.0, EMA alpha 0.3, and a 70% burn  / 30% winner-takes-all allocation.
+- Selects the highest EMA among miners with positive reward in the current round.
+  Exact ties use lowest UID. The registered owner burn target is discovered from
+  the chain and cannot compete. If nobody qualifies, 100% goes to burn.
+- Verifies the Finney chain, validator permit, owner burn destination and weight
+  constraints. It checks miner hotkeys again before submitting.
+
+`--mainnet` fixes these settings so operators use the same policy. Use the
+advanced CLI without `--mainnet` for other configurations. Scorer version and
+synthetic-corpus coverage are distinct: this preset runs the current generated
+workload; it is not proof of performance on independent real-world videos.
+
+## Check that weights became active
+
+The round receipt distinguishes `disabled`, `rate_limited`, `rejected`,
+`unknown`, and submission/inclusion/finalization evidence. With commit/reveal,
+a finalized commitment is not yet an active weight vector. Verify revealed
+weights in finalized chain storage and then the following epoch's incentives.
+Yuma combines votes from all validators; one validator's 70/30 vote does not
+promise a subnet-wide 70/30 payout. New validators can start voting before the
+others update.
+
+`weight-submission.json` preserves submission intent. An unresolved submission
+blocks further submitting rounds; reconcile its transaction/chain state before
+restarting, and preserve the original receipt. Do not delete the guard to retry
+an action whose outcome is unknown. `--no-set-weights` remains available for
+read-only diagnosis. A `rate_limited` round definitely sent no weight transaction;
+normal epoch scheduling tries again with the next round.
+
+For a deliberate temporary return to full burn, stop the mainnet writer, reconcile
+pending commitments, then use the same wallet/network settings with
+`--burn-only --netuid 20 --round-root rounds/burn` instead of `--mainnet`.
+Verify the revealed burn vector; do not run both writers together.
+
+[Scoring formulas, artifacts and advanced modes](scoring.md) ·
+[Base miner setup](miner.md)

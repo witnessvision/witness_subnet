@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+import hashlib
+import json
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 import bittensor as bt
@@ -17,6 +19,31 @@ _TASK_FIELDS = {"duration", "fps", "tier", "schema_version", "qa"}
 class WitnessTask(bt.Synapse):
     """One independently metered reconstruction task and its miner response."""
 
+    required_hash_fields: ClassVar[tuple[str, ...]] = (
+        "task_id", "tool_base_url", "session_id", "scene_id", "seed_commitment",
+        "budget", "task_spec", "deadline_s",
+    )
+
+    @property
+    def body_hash(self) -> str:
+        # Dict insertion order can differ between client/server validator processes.
+        payload = {name: getattr(self, name) for name in self.required_hash_fields}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha3_256(encoded.encode()).hexdigest()
+
+    @classmethod
+    def from_headers(cls, headers: dict) -> "WitnessTask":
+        # SDK 10.5 headers contain empty placeholders for required body fields.
+        # Only transport metadata is validated here. Axon's verify_body_integrity
+        # constructs the full class from JSON and runs every payload validator.
+        metadata = bt.Synapse.from_headers(headers)
+        values = metadata.model_dump()
+        values.update(axon=metadata.axon, dendrite=metadata.dendrite)
+        return cls.model_construct(
+            **values, task_id="", tool_base_url="", session_id="", scene_id="",
+            seed_commitment="", budget={}, task_spec={}, deadline_s=0.0,
+        )
+
     task_id: str = Field(min_length=1)
     tool_base_url: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
@@ -24,7 +51,7 @@ class WitnessTask(bt.Synapse):
     seed_commitment: str = Field(pattern=r"^[0-9a-f]{64}$")
     budget: dict[str, int | float]
     task_spec: dict[str, Any]
-    deadline_s: float = Field(gt=0)
+    deadline_s: float = Field(gt=0, allow_inf_nan=False)
 
     reconstruction: dict[str, Any] = Field(default_factory=dict)
     trace_summary: dict[str, Any] | None = None
@@ -98,4 +125,3 @@ class WitnessTask(bt.Synapse):
             "reconstruction": self.reconstruction,
             "trace_summary": self.trace_summary,
         }
-

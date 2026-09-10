@@ -17,7 +17,9 @@ def test_candidate_requires_explicit_diagnostic_mode():
         ValidatorConfig(score_version="1.7-candidate").validate()
 
 
-def test_round_uses_candidate_and_observed_asr_without_label_transcript(tmp_path):
+@pytest.mark.parametrize("version", ["1.7-candidate", "1.9-candidate", "1.0.0"])
+@pytest.mark.parametrize("set_weights_enabled", [True, False])
+def test_round_uses_candidate_and_observed_asr_without_label_transcript(tmp_path, version, set_weights_enabled):
     from test_subnet import _tiny_scene
     from witness.tools.transcripts import sha256
     source = _tiny_scene(tmp_path / "source", 101)
@@ -51,19 +53,27 @@ def test_round_uses_candidate_and_observed_asr_without_label_transcript(tmp_path
     chain.add_miner(1, oracle)
     validator = WitnessValidator(chain, ValidatorConfig(
         round_root=tmp_path, source_scenes=(source,), scene_count=1,
-        benchmark_lock=None, allow_unlocked=True, score_version="1.7-candidate",
+        benchmark_lock=None, allow_unlocked=version != "1.0.0", score_version=version,
         transcript_source="asr", tool_host="127.0.0.1", tool_port=0,
+        set_weights_enabled=set_weights_enabled,
     ))
     result = asyncio.run(validator.run_round())
     assert [r["text"] for r in observed] == [r["text"] for r in asr]
     row = result["miners"]["1"]["scenes"][0]
-    assert row["score_version"] == "1.7-candidate"
+    assert row["score_version"] == version
     assert row["quality"] == 1
     assert row["gate"]["passed"] is True
+    assert result["miners"]["1"]["metrics"]["quality"] == 1
+    assert result["miners"]["1"]["metrics"]["valid_rate"] == 1
+    if version in {"1.9-candidate", "1.0.0"}:
+        assert row["gate"]["reward_factor"] == 1
+        assert {"quality_v18", "reward"} <= result["scoring_identity"]["code_sha256"].keys()
+    assert result["scoring_identity"]["mode"] == ("production" if version == "1.0.0" else "diagnostic")
     assert row["cost"]["transcript_chars"] > 0
     assert result["scoring_identity"]["transcript_source"] == "asr"
     assert set(result["scene_seeds_revealed"][0]["input_sha256"]) == {"scene.json", "video.mp4", "observations/transcript.json"}
-    assert result["weight_submission"]["status"] == "simulated"
+    assert result["weight_submission"]["status"] == ("simulated" if set_weights_enabled else "disabled")
+    assert bool(chain.weight_history) is set_weights_enabled
     assert json.loads((tmp_path / "ema.json").read_text())["scoring_identity"] == result["scoring_identity"]
 
 
@@ -75,5 +85,26 @@ def test_mismatched_ema_is_rejected_before_query_or_round_creation(tmp_path):
     (tmp_path / "ema.json").write_text(json.dumps({"scores": {"1": .9}, "scoring_identity": {"version": "1.6-candidate"}}))
     with pytest.raises(ValueError, match="EMA scoring identity"):
         asyncio.run(validator.run_round())
+    assert not list(tmp_path.glob("round_*"))
+    assert not chain.weight_history
+
+
+def test_production_is_default_and_does_not_require_candidate_mode():
+    config = ValidatorConfig()
+    assert config.score_version == "1.0.0"
+    assert config.benchmark_lock is None
+    assert not config.allow_unlocked
+    config.validate()
+
+
+def test_promotion_does_not_silently_relabel_or_mix_candidate_ema(tmp_path):
+    config = ValidatorConfig(round_root=tmp_path, transcript_source="none")
+    prior = {"scores": {"1": .12}, "scoring_identity": {"version": "1.9-candidate"}}
+    path = tmp_path / "ema.json"
+    path.write_text(json.dumps(prior))
+    chain = InMemoryChainAdapter()
+    with pytest.raises(ValueError, match="EMA scoring identity"):
+        asyncio.run(WitnessValidator(chain, config).run_round())
+    assert json.loads(path.read_text()) == prior
     assert not list(tmp_path.glob("round_*"))
     assert not chain.weight_history
