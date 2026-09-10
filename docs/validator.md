@@ -83,7 +83,10 @@ for the next epoch instead of repeatedly querying miners.
 - Uses scorer 1.0.0, EMA alpha 0.3, and a 70% burn  / 30% winner-takes-all allocation.
 - Selects the highest EMA among miners with positive reward in the current round.
   Exact ties use lowest UID. The registered owner burn target is discovered from
-  the chain and cannot compete. If nobody qualifies, 100% goes to burn.
+  the chain and cannot compete. If every miner has zero current-round reward,
+  **100% goes to burn and no winner is selected**, even if a miner has positive
+  historical EMA. Weights are never assigned randomly. The same full-burn fallback
+  applies whenever no miner qualifies.
 - Verifies the Finney chain, validator permit, owner burn destination and weight
   constraints. It checks miner hotkeys again before submitting.
 
