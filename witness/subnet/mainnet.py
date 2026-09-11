@@ -82,10 +82,15 @@ class MainnetChainAdapter(BittensorChainAdapter):
 
 
 def mainnet_config(*, round_root, burn_uid, tool_host, tool_port, tool_public_url,
-                   set_weights_enabled, score_window=5, ema_alpha=0.2, score_version=SCORER_VERSION):
+                   set_weights_enabled, score_window=5, ema_alpha=0.2, score_version=SCORER_VERSION,
+                   pool_manifest=None):
     from .validator import ValidatorConfig
+    grounded = score_version == "3.0.0"
+    if grounded and pool_manifest is None:
+        raise ValueError("Grounded mainnet rounds require a reviewed natural annotation pool")
     return ValidatorConfig(
-        round_root=round_root, scene_count=5, programmatic_share=1.0,
+        round_root=round_root, scene_count=5, programmatic_share=.6 if grounded else 1.0,
+        pool_manifest=pool_manifest if grounded else None,
         tool_host=tool_host, tool_port=tool_port, tool_public_url=tool_public_url,
         burn_uid=burn_uid, burn_rate=.7, weight_policy="winner-takes-all",
         transcript_source="none", allow_unlocked=True, epoch_aligned=True,

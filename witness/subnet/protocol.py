@@ -99,7 +99,7 @@ class WitnessTask(bt.Synapse):
         if tier not in (1, 2, 3):
             raise ValueError("task_spec.tier must be 1, 2, or 3")
         schema_version = value.get("schema_version")
-        if not isinstance(schema_version, str) or schema_version not in {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5"}:
+        if not isinstance(schema_version, str) or schema_version not in {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "2.0", "3.0"}:
             raise ValueError("task_spec.schema_version must identify a supported scene schema")
         qa = value.get("qa")
         if not isinstance(qa, list):

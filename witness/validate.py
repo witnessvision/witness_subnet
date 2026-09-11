@@ -48,6 +48,9 @@ def _rgb(hex_color: str) -> np.ndarray:
 def validate(scene_path: Path, video_path: Path | None = None) -> list[str]:
     scene = load_scene(scene_path)
     video = video_path or scene_path.with_name("video.mp4")
+    if scene.get("schema_version") == "3.0":
+        from witness.validate_grounded import validate_grounded
+        return validate_grounded(scene, video)
     failures: list[str] = []
     required = {"seed", "difficulty", "debug_labels", "duration_frames", "fps", "resolution", "events", "dialogue", "on_screen_text", "audio_events", "qa"}
     missing = required - scene.keys()
@@ -276,6 +279,9 @@ def validate(scene_path: Path, video_path: Path | None = None) -> list[str]:
             rms = float(np.sqrt(np.mean(chunk * chunk))) if chunk.size else 0.0
             if rms < 400:
                 failures.append(f"dialogue by {item['speaker']} is missing or too quiet: RMS {rms:.1f}")
+    if scene.get("schema_version") == "2.0":
+        from .validate_temporal import validate_temporal
+        failures.extend(validate_temporal(scene, video))
     return failures
 
 

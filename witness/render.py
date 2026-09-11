@@ -51,10 +51,14 @@ def world_to_screen(scene: dict[str, Any], frame: int, point: list[float]) -> tu
 
 
 def render_frame(scene: dict[str, Any], frame: int) -> Image.Image:
+    if scene.get("schema_version") == "3.0":
+        from witness.grounded import render_frame as render_grounded
+        return render_grounded(scene, frame)
     width, height = scene["resolution"]
     world = Image.new("RGB", (width, height), ROOM_BG)
     draw = ImageDraw.Draw(world)
-    font = ImageFont.load_default()
+    font = (ImageFont.load_default(size=18) if scene.get("schema_version") == "2.0"
+            else ImageFont.load_default())
     draw.rectangle((0, 0, width - 1, 235), fill=WALL, outline=INK, width=2)
     draw.rectangle((0, 236, width - 1, height - 1), fill=FLOOR)
     draw.line((0, 236, width, 236), fill=INK, width=3)
@@ -80,6 +84,10 @@ def render_frame(scene: dict[str, Any], frame: int) -> Image.Image:
     for actor_id, actor in resolved["actors"].items():
         if actor["visible"]:
             _draw_actor(draw, actor_defs[actor_id], actor["position"], font, scene["debug_labels"])
+            if scene.get("schema_version") == "2.0" and actor["carrying"]:
+                x, y = actor["position"]
+                hand = resolved["objects"][actor["carrying"]]["position"]
+                draw.line((x + 12, y - 12, hand[0], hand[1]), fill=INK, width=3)
 
     crop = camera_crop(scene, frame)
     cropped = world.crop(tuple(round(v) for v in crop))
@@ -209,7 +217,10 @@ def render_video(scene: dict[str, Any], target: Path, *, speech_clips: list[Spee
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
             "-r", str(scene["fps"]), "-i", "pipe:0", "-i", str(wav_path),
             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            # Grounded matched worlds use lossless luma/chroma encoding. A
+            # nominally identical final scene must not carry compression noise
+            # from earlier actions that reveals its counterfactual identity.
+            "-preset", "veryfast", "-crf", "0" if scene.get("schema_version") == "3.0" else "18", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-ar", str(scene["audio"]["sample_rate"]),
             "-frames:v", str(scene["duration_frames"]), "-movflags", "+faststart", str(target),
         ]

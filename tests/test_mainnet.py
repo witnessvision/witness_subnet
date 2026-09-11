@@ -86,7 +86,21 @@ def test_preset_is_cpu_only_without_asr_or_hosted_generation(tmp_path):
     assert config.score_window == 5 and config.ema_alpha == .2
 
 
-@pytest.mark.parametrize("args", [["--mainnet"], ["--mainnet", "--burn-only"], ["--mainnet", "--dry-run"]])
+def test_grounded_mainnet_requires_both_content_slices(tmp_path):
+    kwargs = dict(round_root=tmp_path, burn_uid=240, tool_host="127.0.0.1", tool_port=0,
+                  tool_public_url=None, set_weights_enabled=False, score_version="3.0.0")
+    with pytest.raises(ValueError, match="reviewed natural annotation pool"):
+        mainnet_config(**kwargs)
+    config = mainnet_config(**kwargs, pool_manifest=tmp_path/"pool.json")
+    config.validate()
+    assert config.scene_count == 5 and config.programmatic_share == .6
+    assert config.pool_manifest == tmp_path/"pool.json"
+    assert config.weight_policy == "winner-takes-all" and config.burn_rate == .7
+    assert config.score_window == 5 and config.ema_alpha == .2
+
+
+@pytest.mark.parametrize("args", [["--mainnet"], ["--mainnet", "--burn-only"], ["--mainnet", "--dry-run"],
+    ["--mainnet", "--tool-public-url", "https://tools.example", "--score-version", "3.0.0"]])
 def test_bad_mainnet_invocation_fails_before_wallet_or_rpc(monkeypatch, args):
     monkeypatch.setattr(MainnetChainAdapter, "__init__", lambda *a, **kw: pytest.fail("opened chain"))
     result = CliRunner().invoke(app, args)

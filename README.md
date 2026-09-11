@@ -22,6 +22,16 @@ default. Quality at least `0.4` receives credit; lower quality receives zero.
 Independent benchmark validation and competitive miner quality remain separate
 from the release version; local tests and diagnostic rounds do not establish them.
 
+The local [temporal benchmark 2.0](docs/temporal-benchmark.md) adds randomized
+interaction histories and duplicate comparison based on scored facts. It is
+selected explicitly; the production default remains unchanged. See the
+[local temporal check](docs/temporal-local.md) to exercise its protocol and scorer.
+
+The local [grounded benchmark 3.0 candidate](docs/grounded-benchmark.md) adds
+action/result evidence, reviewed natural-video sequences, and shared credit for
+partial copies. Its validation scope and source-memorization limits are explicit;
+it is not selected by default.
+
 ## Why Witness
 
 Understanding video involves more than identifying what appears in a frame.

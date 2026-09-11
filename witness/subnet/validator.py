@@ -33,6 +33,8 @@ from witness.score_v1_1_0 import (SCORER_VERSION, QUALITY_THRESHOLD,
                                   reward_metrics as fixed_reward_metrics,
                                   score_reconstruction as production_scorer)
 from witness.tools.server import Budget, create_app
+from witness.score_v2_0_0 import SCORER_VERSION as TEMPORAL_VERSION
+from witness.score_v3_0_0 import SCORER_VERSION as GROUNDED_VERSION, apply_fact_sharing
 
 from .chain import BittensorChainAdapter, ChainAdapter, InMemoryChainAdapter, MinerEndpoint, WeightSubmission
 from .protocol import WitnessFeedback, WitnessTask
@@ -93,7 +95,7 @@ class ValidatorConfig:
     transcript_source: str = "legacy_labels"
 
     def validate(self) -> None:
-        if self.score_version not in {SCORER_VERSION, "1.0.0", "1.5", "1.6-candidate", "1.7-candidate", "1.8", REWARD_VERSION}:
+        if self.score_version not in {SCORER_VERSION, TEMPORAL_VERSION, GROUNDED_VERSION, "1.0.0", "1.5", "1.6-candidate", "1.7-candidate", "1.8", REWARD_VERSION}:
             raise ValueError("unknown score_version")
         if self.score_version not in {SCORER_VERSION, "1.0.0", "1.5"} and not self.allow_unlocked:
             raise ValueError("candidate scoring requires explicit allow_unlocked diagnostic mode")
@@ -101,6 +103,17 @@ class ValidatorConfig:
             raise ValueError("unknown transcript_source")
         if self.transcript_source == "asr" and not self.source_scenes:
             raise ValueError("ASR rounds require source_scenes with precomputed observations")
+        if self.score_version in {TEMPORAL_VERSION, GROUNDED_VERSION}:
+            if self.transcript_source == "legacy_labels":
+                raise ValueError("temporal scoring forbids label-derived transcripts")
+            if self.score_version == TEMPORAL_VERSION and not self.source_scenes and self.programmatic_share != 1:
+                raise ValueError("temporal generation requires programmatic_share=1")
+            if (self.score_version == GROUNDED_VERSION and not self.source_scenes
+                    and self.programmatic_share < 1 and self.pool_manifest is None):
+                raise ValueError("grounded real scenes require a reviewed annotation pool")
+            if (self.score_version == GROUNDED_VERSION and not self.source_scenes
+                    and 0 < self.programmatic_share < 1 and self.scene_count < 2):
+                raise ValueError("a hybrid grounded round requires at least two scenes")
         if self.epoch_poll_s <= 0:
             raise ValueError("Epoch poll interval must be positive")
         if self.scene_count < 1:
@@ -277,7 +290,7 @@ def reconstruction_hash(reconstruction: Mapping[str, Any]) -> str:
 
 
 def apply_relative_gate(records: list[dict[str, Any]], *, score_version: str = SCORER_VERSION) -> None:
-    if score_version == SCORER_VERSION:
+    if score_version in {SCORER_VERSION, TEMPORAL_VERSION, GROUNDED_VERSION}:
         for record in records:
             metrics = fixed_reward_metrics(float(record["quality"]),
                                            float(record["efficiency_factor"]),
@@ -334,11 +347,17 @@ def apply_relative_gate(records: list[dict[str, Any]], *, score_version: str = S
 
 
 def apply_duplicate_sharing(records: list[dict[str, Any]]) -> None:
+    apply_fact_sharing(records)
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in records:
-        if not record["responded"]:
+        if not record["responded"] or record.get("score_version") == GROUNDED_VERSION:
             continue
-        digest = reconstruction_hash(record["reconstruction"])
+        if record.get("score_version") == TEMPORAL_VERSION:
+            if float(record["score_before_duplicates"]) <= 0:
+                continue
+            digest = record["semantic_fingerprint"]
+        else:
+            digest = reconstruction_hash(record["reconstruction"])
         record["reconstruction_hash"] = digest
         groups.setdefault((str(record["scene_id"]), digest), []).append(record)
     for group in groups.values():
@@ -359,7 +378,18 @@ def aggregate_miner_scores(
     scene_count: int,
     previous_ema: Mapping[str, float],
     alpha: float,
+    *,
+    scene_kinds: Mapping[str, str] | None = None,
 ) -> tuple[dict[int, float], dict[int, float], set[int]]:
+    if scene_count < 1:
+        raise ValueError("scene_count must be positive")
+    if scene_kinds is not None:
+        if len(scene_kinds) != scene_count or not set(scene_kinds.values()) <= {"interaction_world", "real_actions"}:
+            raise ValueError("invalid grounded round scene inventory")
+        if any(r.get("score_version") != GROUNDED_VERSION or r["scene_id"] not in scene_kinds for r in records):
+            raise ValueError("grounded round records disagree with scene inventory")
+        if len({(int(r["uid"]), r["scene_id"]) for r in records}) != len(records):
+            raise ValueError("duplicate UID/scene round records")
     totals = {int(uid): 0.0 for uid in uids}
     responders: set[int] = set()
     for record in records:
@@ -368,6 +398,16 @@ def aggregate_miner_scores(
         if record["responded"]:
             responders.add(uid)
     round_scores = {uid: totals.get(uid, 0.0) / scene_count for uid in totals}
+    if scene_kinds is not None:
+        # Denominators come from attempted scenes, including absent/offline rows.
+        # A strong procedural slice cannot compensate for ignoring natural video.
+        kinds = set(scene_kinds.values())
+        counts = {kind: sum(value == kind for value in scene_kinds.values()) for kind in kinds}
+        slices = {uid: {kind: 0.0 for kind in kinds} for uid in totals}
+        for record in records:
+            slices[int(record["uid"])][scene_kinds[record["scene_id"]]] += float(record["score"])
+        round_scores = {uid: min(values[kind] / counts[kind] for kind in kinds)
+                        for uid, values in slices.items()}
     ema: dict[int, float] = {}
     for uid, score in round_scores.items():
         prior = previous_ema.get(str(uid))
@@ -441,6 +481,12 @@ class WitnessValidator:
         self.scorer = score_reconstruction
         if config.score_version == SCORER_VERSION:
             self.scorer = production_scorer
+        elif config.score_version == TEMPORAL_VERSION:
+            from witness.score_v2_0_0 import score_reconstruction as scorer
+            self.scorer = scorer
+        elif config.score_version == GROUNDED_VERSION:
+            from witness.score_v3_0_0 import score_reconstruction as scorer
+            self.scorer = scorer
         elif config.score_version == "1.0.0":
             self.scorer = legacy_production_scorer
         elif config.score_version == "1.6-candidate":
@@ -468,12 +514,54 @@ class WitnessValidator:
                 "production" if config.score_version in {SCORER_VERSION, "1.0.0"} else "legacy"),
             "lock_verification": "required" if config.benchmark_lock is not None and not config.allow_unlocked else "disabled_or_diagnostic",
         }
-        if config.score_version in {SCORER_VERSION, "1.0.0", REWARD_VERSION}:
+        if config.score_version in {SCORER_VERSION, TEMPORAL_VERSION, GROUNDED_VERSION, "1.0.0", REWARD_VERSION}:
             self.scoring_identity["code_sha256"].update({
                 name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
                 for name, path in (("quality_v18", "witness/score_v18.py"),
                                    ("reward", "witness/reward.py"))
             })
+        if config.score_version in {TEMPORAL_VERSION, GROUNDED_VERSION}:
+            self.scoring_identity["code_sha256"].update({
+                name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
+                for name, path in (("temporal_generator", "witness/temporal.py"),
+                                   ("renderer", "witness/render.py"),
+                                   ("fixed_reward", "witness/score_v1_1_0.py"),
+                                   ("observation_server", "witness/tools/server.py"))
+            })
+        if config.score_version == GROUNDED_VERSION:
+            self.scoring_identity["code_sha256"].update({
+                name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
+                for name, path in (("grounded_generator", "witness/grounded.py"),
+                                   ("grounded_validation", "witness/validate_grounded.py"),
+                                   ("grounded_real_generator", "witness/grounded_real.py"),
+                                   ("grounded_scene_helpers", "witness/scene.py"),
+                                   ("grounded_speech_backend", "witness/tts.py"))
+            })
+            kinds = set()
+            fixture_revisions = []
+            selected_fixtures = ([config.source_scenes[i % len(config.source_scenes)]
+                                  for i in range(config.scene_count)] if config.source_scenes else [])
+            for source in selected_fixtures:
+                raw = (source / "scene.json").read_bytes()
+                kinds.add(json.loads(raw)["content_kind"])
+                fixture_revisions.append(hashlib.sha256(raw).hexdigest())
+            if not config.source_scenes:
+                if config.programmatic_share > 0:
+                    kinds.add("interaction_world")
+                if config.programmatic_share < 1:
+                    kinds.add("real_actions")
+            self.scoring_identity["content_scope"] = {
+                "kinds": sorted(kinds), "full_hybrid": kinds == {"interaction_world", "real_actions"},
+                "scene_count": config.scene_count,
+                "programmatic_share": config.programmatic_share if not config.source_scenes else None,
+                "fixture_revisions": fixture_revisions,
+            }
+        self.grounded_sources = []
+        if config.score_version == GROUNDED_VERSION and not config.source_scenes and config.programmatic_share < 1:
+            from witness.grounded_real import load_annotation_pool
+            self.grounded_sources = load_annotation_pool(config.pool_manifest)
+            self.scoring_identity["annotation_pool_sha256"] = hashlib.sha256(config.pool_manifest.read_bytes()).hexdigest()
+            self.scoring_identity["annotation_revisions"] = sorted(digest for _, digest in self.grounded_sources)
         self.benchmark_lock = load_and_verify_benchmark_lock(
             config.benchmark_lock,
             config.locked_scene_root,
@@ -490,6 +578,8 @@ class WitnessValidator:
             "alpha": config.ema_alpha,
             "bootstrap": "first_positive_mean" if config.score_window is not None else "first_round",
         }
+        if config.score_version == GROUNDED_VERSION:
+            self.aggregation_identity["scene_reduction"] = "minimum_content_slice_mean"
         if config.score_window is not None:
             self.aggregation_identity["code_sha256"] = hashlib.sha256(
                 Path(inspect.getfile(rolling_mean_ema)).read_bytes()).hexdigest()
@@ -605,6 +695,8 @@ class WitnessValidator:
                             "session_id": session_id,
                             "responded": responded,
                             "score_version": self.config.score_version,
+                            **({"content_kind": scene.truth["content_kind"]}
+                               if self.config.score_version == GROUNDED_VERSION else {}),
                             "error": error,
                             "quality": report["quality"],
                             "efficiency_factor": report["cost"]["efficiency_factor"],
@@ -613,6 +705,14 @@ class WitnessValidator:
                             "diagnostics": report.get("diagnostics", []),
                             "reconstruction": reconstruction,
                             "trace_summary": response.trace_summary if response else None,
+                            **({"semantic_fingerprint": report["semantic_fingerprint"],
+                                "temporal": report["temporal"],
+                                "reconstruction_quality": report["reconstruction_quality"]}
+                               if self.config.score_version == TEMPORAL_VERSION else {}),
+                            **({"semantic_fingerprint": report["semantic_fingerprint"],
+                                "semantic_credits": report["semantic_credits"],
+                                "grounding": report["grounding"]}
+                               if self.config.score_version == GROUNDED_VERSION else {}),
                         }
 
                 records.extend(await asyncio.gather(*(evaluate(endpoint) for endpoint in ordered)))
@@ -624,7 +724,9 @@ class WitnessValidator:
         # Dropping an axon advertisement must not reset a miner's track record.
         scored_uids = sorted(set(uids) | {int(uid) for uid in previous_rounds})
         round_scores, ema_scores, responders = aggregate_miner_scores(
-            scored_uids, records, len(scenes), previous, self.config.ema_alpha
+            scored_uids, records, len(scenes), previous, self.config.ema_alpha,
+            scene_kinds=({s.scene_id: s.truth["content_kind"] for s in scenes}
+                         if self.config.score_version == GROUNDED_VERSION else None),
         )
         window_scores = round_scores
         round_history = {}
@@ -659,6 +761,8 @@ class WitnessValidator:
                     "seed_commitment": commitments[scene.scene_id],
                     "kind": scene.kind,
                     "tier": int(scene.truth["difficulty"]),
+                    **({"content_kind": scene.truth["content_kind"]}
+                       if self.config.score_version == GROUNDED_VERSION else {}),
                     "input_sha256": {
                         name: hashlib.sha256((scene.directory / name).read_bytes()).hexdigest()
                         for name in ("scene.json", "video.mp4", "observations/transcript.json")
@@ -675,6 +779,11 @@ class WitnessValidator:
                     "window_rounds_observed": len(round_history.get(str(uid), [])),
                     "ema_score": round(ema_scores[uid], 12),
                     "responded": uid in responders,
+                    **({"content_slices": {
+                        kind: summarize_records([record for record in records
+                                                 if int(record["uid"]) == uid and record["content_kind"] == kind])
+                        for kind in sorted({scene.truth["content_kind"] for scene in scenes})}}
+                       if self.config.score_version == GROUNDED_VERSION else {}),
                     "scenes": [record for record in records if int(record["uid"]) == uid],
                 }
                 for uid in uids
@@ -773,7 +882,7 @@ class WitnessValidator:
         locked_sources = self._locked_sources(block_hash)
         locked_indexes: dict[int, int] = {}
         for index in range(self.config.scene_count):
-            seed = secrets.randbits(64)
+            seed = secrets.randbits(256 if self.config.score_version in {TEMPORAL_VERSION, GROUNDED_VERSION} else 64)
             tier = self.config.tiers[index % len(self.config.tiers)]
             scene_token = secrets.token_hex(12)
             destination = root / f"scene_{scene_token}"
@@ -781,6 +890,10 @@ class WitnessValidator:
                 source = source_scenes[index % len(source_scenes)].resolve()
                 if not (source / "scene.json").is_file() or not (source / "video.mp4").is_file():
                     raise ValueError(f"invalid source scene directory: {source}")
+                if self.config.score_version == GROUNDED_VERSION:
+                    expected = self.scoring_identity["content_scope"]["fixture_revisions"][index]
+                    if hashlib.sha256((source / "scene.json").read_bytes()).hexdigest() != expected:
+                        raise ValueError("grounded fixture changed after scoring identity was recorded")
                 destination.mkdir(parents=True)
                 shutil.copy2(source / "scene.json", destination / "scene.json")
                 shutil.copy2(source / "video.mp4", destination / "video.mp4")
@@ -789,8 +902,22 @@ class WitnessValidator:
                     shutil.copy2(source / "observations/transcript.json", destination / "observations/transcript.json")
                 kind = "fixture"
             elif index in programmatic_indexes:
-                generate(seed, tier, destination)
+                if self.config.score_version == TEMPORAL_VERSION:
+                    from witness.temporal import generate as generate_temporal
+                    generate_temporal(seed, tier, destination)
+                elif self.config.score_version == GROUNDED_VERSION:
+                    from witness.grounded import generate as generate_grounded
+                    generate_grounded(seed, tier, destination)
+                else:
+                    generate(seed, tier, destination)
                 kind = "programmatic"
+            elif self.config.score_version == GROUNDED_VERSION:
+                from witness.grounded_real import generate as generate_real
+                annotation, expected_sha = secrets.choice(self.grounded_sources)
+                if hashlib.sha256(annotation.read_bytes()).hexdigest() != expected_sha:
+                    raise ValueError("grounded annotation changed after round identity was recorded")
+                generate_real(annotation, seed, tier, destination)
+                kind = "grounded_real"
             elif locked_sources:
                 candidates = locked_sources.get(tier) or [
                     source
@@ -810,6 +937,15 @@ class WitnessValidator:
                 generate_recomposition(seed, tier, self.config.pool_manifest, destination)
                 kind = "recomposed"
             truth = json.loads((destination / "scene.json").read_text(encoding="utf-8"))
+            if self.config.score_version == TEMPORAL_VERSION and truth.get("schema_version") != "2.0":
+                raise ValueError("temporal scorer requires schema2.0 scene sources")
+            if self.config.score_version == GROUNDED_VERSION:
+                if truth.get("schema_version") != "3.0":
+                    raise ValueError("grounded scorer requires schema3.0 scene sources")
+                from witness.validate_grounded import validate_grounded
+                failures = validate_grounded(truth, destination / "video.mp4")
+                if failures:
+                    raise ValueError(f"grounded scene failed media validity: {failures[:3]}")
             scenes.append(RoundScene(destination.name, destination, truth, int(truth["seed"]), kind))
         return scenes
 
@@ -971,7 +1107,7 @@ def run(
     dry_run: bool = typer.Option(False, help="Use the local base miner and no chain"),
     mainnet: bool = typer.Option(False, "--mainnet", envvar="WITNESS_MAINNET",
                                 help="CPU-only SN20 preset: five fresh scenes, 70% burn / 30% one winner per epoch."),
-    score_version: str = typer.Option(SCORER_VERSION, help="Production 1.1.0; historical 1.0.0, 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
+    score_version: str = typer.Option(SCORER_VERSION, help="Production 1.1.0; local candidates 2.0.0 and 3.0.0; historical 1.0.0, 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
     transcript_source: str = typer.Option("legacy_labels", help="legacy_labels, asr or none"),
     once: bool = typer.Option(False, help="Run one round and exit"),
 ) -> None:
@@ -981,6 +1117,8 @@ def run(
             raise typer.BadParameter("--mainnet cannot be combined with --burn-only or --dry-run")
         if not tool_public_url:
             raise typer.BadParameter("--tool-public-url is required for mainnet")
+        if score_version == GROUNDED_VERSION and pool_manifest is None:
+            raise typer.BadParameter("--pool-manifest is required for grounded mainnet rounds")
         from .mainnet import MainnetChainAdapter, mainnet_config
         live = MainnetChainAdapter(netuid=20, network=network, wallet_name=wallet_name,
                                    wallet_hotkey=wallet_hotkey, wallet_path=wallet_path)
@@ -990,7 +1128,7 @@ def run(
                                     tool_public_url=tool_public_url, set_weights_enabled=set_weights_enabled,
                                     score_window=5 if score_window is None else score_window,
                                     ema_alpha=0.2 if ema_alpha is None else ema_alpha,
-                                    score_version=score_version)
+                                    score_version=score_version, pool_manifest=pool_manifest)
             validator = WitnessValidator(live, preset)
             if once:
                 artifact = asyncio.run(validator.run_round())
