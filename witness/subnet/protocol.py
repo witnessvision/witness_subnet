@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 import hashlib
 import json
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar, Literal
 from urllib.parse import urlparse
 
 import bittensor as bt
-from pydantic import Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 _BUDGET_FIELDS = {"visual_tokens", "audio_seconds", "transcript_chars"}
@@ -125,3 +125,102 @@ class WitnessTask(bt.Synapse):
             "reconstruction": self.reconstruction,
             "trace_summary": self.trace_summary,
         }
+
+
+# Feedback has an explicit numerical schema: no arbitrary miner/validator
+# dictionaries, solutions, seed reveals, session credentials or diagnostics.
+UnitScore = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+Nonnegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+Family = Literal["events", "dialogue", "shots", "on_screen_text", "audio_events", "intentional_errors", "qa"]
+
+
+class FeedbackModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class FeedbackCost(FeedbackModel):
+    visual_tokens: int = Field(ge=0)
+    audio_seconds: Nonnegative
+    transcript_chars: int = Field(ge=0)
+
+
+class FeedbackGate(FeedbackModel):
+    threshold: UnitScore
+    partial_floor: UnitScore
+    reward_factor: UnitScore
+    passed: bool
+
+
+class FeedbackScene(FeedbackModel):
+    scene_id: str = Field(min_length=1, max_length=128)
+    tier: int = Field(ge=1, le=3)
+    responded: bool
+    status: Literal["ok", "missing", "busy", "deadline_exceeded", "error", "degraded"]
+    quality: UnitScore
+    efficiency_factor: UnitScore
+    family_scores: dict[Family, UnitScore]
+    cost: FeedbackCost
+    gate: FeedbackGate
+    score_before_duplicates: UnitScore
+    duplicate_count: int = Field(ge=0)
+    score: UnitScore
+
+
+class FeedbackMiner(FeedbackModel):
+    uid: int = Field(ge=0)
+    hotkey: str = Field(min_length=1, max_length=128)
+    round_score: UnitScore
+    window_score: UnitScore
+    window_rounds_observed: int = Field(ge=0)
+    ema_score: UnitScore
+    weight: UnitScore
+    responded: bool
+    scenes: list[FeedbackScene] = Field(max_length=64)
+
+
+class FeedbackAggregation(FeedbackModel):
+    version: str
+    algorithm: Literal["rolling_mean_ema", "ema"]
+    window_rounds: int | None = Field(ge=1)
+    alpha: float = Field(gt=0, le=1, allow_inf_nan=False)
+    bootstrap: Literal["first_positive_mean", "first_round"]
+
+
+class RoundFeedback(FeedbackModel):
+    schema_version: Literal["1.0"] = "1.0"
+    round_id: str = Field(min_length=1, max_length=128)
+    validator_hotkey: str = Field(min_length=1, max_length=128)
+    completed_at: str = Field(min_length=1, max_length=64)
+    scorer_version: str = Field(min_length=1, max_length=64)
+    aggregation: FeedbackAggregation
+    weight_policy: Literal["winner-takes-all", "proportional"]
+    burn_uid: int | None = Field(ge=0)
+    burn_rate: UnitScore
+    winner_uid: int | None = Field(ge=0)
+    submission_status: str = Field(min_length=1, max_length=32)
+    weights_applied: None = None
+    miners: list[FeedbackMiner] = Field(max_length=4096)
+
+
+class WitnessFeedback(bt.Synapse):
+    """Signed round feedback, delivered after scoring and weight submission."""
+
+    report: RoundFeedback
+    accepted: bool = False
+    required_hash_fields: ClassVar[tuple[str, ...]] = ("report",)
+
+    @property
+    def body_hash(self) -> str:
+        encoded = json.dumps(self.report.model_dump(), sort_keys=True,
+                             separators=(",", ":"), allow_nan=False)
+        return hashlib.sha3_256(encoded.encode()).hexdigest()
+
+    @classmethod
+    def from_headers(cls, headers: dict) -> "WitnessFeedback":
+        metadata = bt.Synapse.from_headers(headers)
+        values = metadata.model_dump()
+        values.update(axon=metadata.axon, dendrite=metadata.dendrite)
+        return cls.model_construct(**values, report=None, accepted=False)
+
+    def deserialize(self) -> dict[str, Any]:
+        return {"accepted": self.accepted}

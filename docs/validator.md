@@ -3,7 +3,7 @@
 Witness validates on **Bittensor Finney, subnet 20**. The validator needs **CPU
 only**: no GPU, CUDA, OpenAI account, API key or model download. It generates
 video/audio locally with FFmpeg and eSpeak NG, serves metered observations to
-miners, and scores their JSON responses with **Witness Scorer v1.0.0**.
+miners, and scores their JSON responses with **Witness Scorer v1.1.0**.
 Miners provide their own inference. The validator does not run a miner.
 
 You need a Linux server with Python 3.11+, a registered SN20 hotkey with a validator
@@ -29,9 +29,9 @@ with `.venv/bin/python -m pip install .`. Preserve existing round history. If an
 upgrade changes the scoring identity, use a fresh `--round-root`; do not edit
 an old EMA identity to make the check pass.
 
-Aggregation 1.1.0 changes the history format. When upgrading from the original
-single-round EMA, reconcile the old `weight-submission.json`, keep the old directory,
-and use a fresh `--round-root rounds/mainnet-v1.1`. Do not relabel the old EMA file.
+Scorer 1.1.0 and EMA alpha 0.2 require fresh history. Reconcile the old
+`weight-submission.json`, preserve the old directory, and use a fresh
+`--round-root rounds/mainnet-scorer-v1.1.0`. Do not relabel or blend old scores.
 
 ## 2. Check one round without changing weights
 
@@ -52,7 +52,7 @@ required. Environment-based deployments can use `WITNESS_WALLET`,
 `WITNESS_HOTKEY`, `WITNESS_WALLET_PATH`, `WITNESS_NETWORK` and
 `WITNESS_TOOL_PUBLIC_URL`; export them through your existing service manager.
 
-Inspect `rounds/mainnet-v1/round_*/round.json`: the scorer should be `1.0.0`,
+Inspect `rounds/mainnet-scorer-v1.1.0/round_*/round.json`: the scorer should be `1.1.0`,
 `weight_policy.name` should be `winner-takes-all`, and submission status must
 be `disabled`. Miner responses, reward, winner and calculated weights are recorded
 there. Offline or incompatible miners can return zero; only eligible responses
@@ -72,7 +72,7 @@ Run the same command without the two test flags:
 
 **This command submits weights.** Keep it running through your existing systemd,
 PM2 or container supervisor. Use one writer per hotkey. The default persistent
-state is `rounds/mainnet-v1`; keep the working directory stable across restarts.
+state is `rounds/mainnet-scorer-v1.1.0`; keep the working directory stable across restarts.
 Use `--round-root PATH` for another private writable state directory. The process
 records an epoch heartbeat in `epoch-state.json`. If an epoch round fails, it waits
 for the next epoch instead of repeatedly querying miners.
@@ -84,8 +84,8 @@ for the next epoch instead of repeatedly querying miners.
   Each miner receives one task at a time, with a 180-second response deadline.
 - Provides frames and audio. No transcript is supplied; miners may transcribe the
   audio themselves. The preset never exposes label-derived transcript hints.
-- Uses scorer 1.0.0 and aggregation 1.1.0: mean reward over the last five rounds,
-  followed by EMA alpha 0.1, with a 70% burn / 30% winner-takes-all allocation.
+- Uses scorer 1.1.0 (fixed quality threshold 0.4) and aggregation 1.1.0: mean reward over the last five rounds,
+  followed by EMA alpha 0.2, with a 70% burn / 30% winner-takes-all allocation.
 - Selects the highest EMA among miners with positive reward in the current round.
   Exact ties use lowest UID. The registered owner burn target is discovered from
   the chain and cannot compete. If every miner has zero current-round reward,
@@ -95,15 +95,15 @@ for the next epoch instead of repeatedly querying miners.
 - Verifies the Finney chain, validator permit, owner burn destination and weight
   constraints. It checks miner hotkeys again before submitting.
 
-The round window and EMA alpha are configurable with `--score-window 5 --ema-alpha 0.1`
+The round window and EMA alpha are configurable with `--score-window 5 --ema-alpha 0.2`
 (or `WITNESS_SCORE_WINDOW` and `WITNESS_EMA_ALPHA`). Operators should agree on the
 same values. Changing either requires a new round root, preserving previous evidence.
 
 For each miner, let `m` be the mean of its last N round rewards. During startup,
 average only the rounds observed so far; zero and missing-response rounds count.
 EMA stays zero until the first positive `m`, which initializes EMA directly as a
-quick start. Afterward, `EMA = 0.1 * m + 0.9 * previous_EMA`. For example, round
-rewards `0, 0, 0.9` initialize EMA at `0.3`, rather than `0.03` or zero. This does
+quick start. Afterward, `EMA = 0.2 * m + 0.8 * previous_EMA`. For example, round
+rewards `0, 0, 0.9` initialize EMA at `0.3`, rather than `0.06` or zero. This does
 not discard the first positive reward. The N-round window bounds raw samples;
 EMA still retains influence from older rounds. Smoothing reduces reactions to
 individual rounds but increases response lag and cannot eliminate winner changes.
@@ -118,6 +118,20 @@ the all-zero full-burn rule still apply after smoothing.
 for other configurations. Scorer version and
 synthetic-corpus coverage are distinct: this preset runs the current generated
 workload; it is not proof of performance on independent real-world videos.
+
+## Miner feedback
+
+After recording scores, weights and history, the validator sends `WitnessFeedback`
+to every evaluated miner except the burn destination. It contains all miners'
+per-scene quality, family scores, measured costs, gate results, duplicate counts,
+rewards, window means, EMA and proposed weights. No reconstructions, reference
+answers, seeds or observation-session credentials are sent. The same public
+report is saved as `feedback.json` beside `round.json`.
+
+Delivery is bounded and recorded separately under `round.json.feedback`. Older
+miners can reject the new route without affecting scoring or weight submission.
+An accepted delivery means the miner acknowledged the report; it is not evidence
+of a paid reward or revealed weights. See [miner reception](miner.md#round-feedback).
 
 ## Check that weights became active
 

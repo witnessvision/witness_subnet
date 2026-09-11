@@ -17,8 +17,8 @@ code, synthetic scene utilities and a minimal base miner. The base miner returns
 an empty reconstruction; implement your own inference in a separate package.
 No trained miner, model weights or private evaluation data are distributed here.
 
-The production scoring contract is **Witness Scorer v1.0.0**, the validator's
-default. It preserves the rules first exercised on mainnet as `1.9-candidate`.
+The production scoring contract is **Witness Scorer v1.1.0**, the validator's
+default. Quality at least `0.4` receives credit; lower quality receives zero.
 Independent benchmark validation and competitive miner quality remain separate
 from the release version; local tests and diagnostic rounds do not establish them.
 
@@ -78,9 +78,11 @@ eligibility before observation efficiency contributes to the final score.
 
 Round reports also expose reconstruction quality, quality times efficiency,
 threshold pass rates and component scores by difficulty, including failed scenes
-in the denominator. Production scorer `1.0.0` includes a narrow partial-credit
-band below the full-credit thresholds; historical scoring remains available.
-See [the production scoring contract](docs/scoring.md#production-scorer-v100)
+in the denominator. Production scorer `1.1.0` grants credit when quality is at least `0.4`;
+quality below `0.4` receives zero. Efficiency and duplicate sharing still apply.
+The mainnet preset uses a five-round mean followed by EMA alpha `0.2`, and sends
+all miners a numerical round report through `WitnessFeedback`.
+See [the production scoring contract](docs/scoring.md#production-scorer-v110)
 for selection and offline comparison of saved rounds.
 
 Observation usage comes from validator-owned session records rather than miner

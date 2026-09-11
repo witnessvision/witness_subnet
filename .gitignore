@@ -18,6 +18,7 @@ __pycache__/
 # Generated benchmark and validator output
 /reports/bench/
 /rounds/
+/feedback/
 /reports/launch/round-smoke/
 /reports/launch/dev-e2e/
 /reports/launch/v16-smoke/

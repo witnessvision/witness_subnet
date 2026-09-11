@@ -7,7 +7,7 @@ import inspect
 from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Protocol
 
-from .protocol import WitnessTask
+from .protocol import WitnessFeedback, WitnessTask
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,10 @@ class ChainAdapter(Protocol):
     async def query(
         self, endpoint: MinerEndpoint, task: WitnessTask, timeout: float
     ) -> WitnessTask | None: ...
+
+    async def send_feedback(
+        self, endpoint: MinerEndpoint, feedback: WitnessFeedback, timeout: float
+    ) -> dict[str, Any]: ...
 
     def set_weights(self, uids: list[int], weights: list[float]) -> WeightSubmission: ...
 
@@ -135,6 +139,17 @@ class BittensorChainAdapter:
         status = getattr(getattr(response, "dendrite", None), "status_code", None)
         return response if status in (None, 200) else None
 
+    async def send_feedback(self, endpoint, feedback: WitnessFeedback, timeout: float) -> dict[str, Any]:
+        if self.dendrite is None:
+            raise RuntimeError("this adapter was created without a dendrite")
+        responses = await self.dendrite(axons=[endpoint.axon], synapse=feedback,
+                                        timeout=timeout, deserialize=False)
+        response = responses[0] if responses else None
+        code = getattr(getattr(response, "dendrite", None), "status_code", None)
+        accepted = (isinstance(response, WitnessFeedback) and code == 200
+                    and response.accepted is True and response.report == feedback.report)
+        return {"status": "accepted" if accepted else "not_accepted", "status_code": code}
+
     def set_weights(self, uids: list[int], weights: list[float]) -> WeightSubmission:
         if len(uids) != len(weights):
             raise ValueError("uids and weights must have the same length")
@@ -173,6 +188,7 @@ class BittensorChainAdapter:
         external_ip: str | None = None,
         external_port: int | None = None,
         max_workers: int = 4,
+        feedback_receiver: Any = None,
     ) -> Any:
         bt = _bt()
         axon = _constructor(bt, "Axon", "axon")(
@@ -188,6 +204,10 @@ class BittensorChainAdapter:
             blacklist_fn=blacklist_fn,
             priority_fn=priority_fn,
         )
+        if feedback_receiver is not None:
+            axon.attach(forward_fn=feedback_receiver.forward,
+                        blacklist_fn=feedback_receiver.blacklist,
+                        priority_fn=feedback_receiver.priority)
         return axon.serve(netuid=self.netuid, subtensor=self.subtensor).start()
 
     def stake_for_hotkey(self, hotkey: str) -> float:
@@ -199,6 +219,13 @@ class BittensorChainAdapter:
 
     def is_registered(self, hotkey: str) -> bool:
         return hotkey in self.metagraph.hotkeys
+
+    def is_validator(self, hotkey: str) -> bool:
+        try:
+            index = self.metagraph.hotkeys.index(hotkey)
+        except ValueError:
+            return False
+        return bool(self.metagraph.validator_permit[index])
 
     def close(self) -> None:
         for value in (self.dendrite, self.subtensor):
@@ -225,6 +252,7 @@ class InMemoryChainAdapter:
         self.block_hash = block_hash
         self.validator_hotkey = validator_hotkey
         self.weight_history: list[dict[str, list[int] | list[float]]] = []
+        self.feedback_handlers: dict[int, Callable] = {}
 
     def add_miner(self, uid: int, handler: Handler, hotkey: str | None = None) -> None:
         self.handlers[int(uid)] = handler
@@ -263,3 +291,12 @@ class InMemoryChainAdapter:
         record: dict[str, Any] = {"uids": list(uids), "weights": list(weights)}
         self.weight_history.append(record)
         return WeightSubmission("simulated")
+
+    async def send_feedback(self, endpoint, feedback: WitnessFeedback, timeout: float) -> dict[str, Any]:
+        handler = self.feedback_handlers.get(endpoint.uid)
+        if handler is None:
+            return {"status": "not_accepted", "status_code": 404}
+        request = feedback.model_copy(deep=True)
+        request.dendrite.hotkey = self.validator_hotkey
+        result = await asyncio.wait_for(handler(request), timeout=timeout)
+        return {"status": "accepted" if result.accepted else "not_accepted", "status_code": 200}

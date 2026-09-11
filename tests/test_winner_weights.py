@@ -120,7 +120,7 @@ def test_full_round_sends_70_30_to_one_winner_and_preserves_scorer(tmp_path, gen
     weights = dict(zip(result["weights"]["uids"], result["weights"]["values"]))
     assert weights == pytest.approx({3: 0.3, 7: 0, 240: 0.7})
     assert result["weight_policy"]["winner_uid"] == 3
-    assert result["scoring_identity"]["version"] == "1.0.0"
+    assert result["scoring_identity"]["version"] == "1.1.0"
     assert result["weight_submission"]["status"] == "disabled"
     assert chain.weight_history == []
     assert json.loads(v._ema_path.read_text())["hotkeys"] == {"3": "three", "7": "seven", "240": "burn"}

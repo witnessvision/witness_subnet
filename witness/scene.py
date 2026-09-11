@@ -7,7 +7,7 @@ import json
 import random
 from typing import Any
 
-from .tts import synthesize
+from .tts import SpeechClip, synthesize
 
 FPS = 24
 WIDTH = 640
@@ -88,6 +88,7 @@ def build_scene(
     *,
     include_tts_timing: bool = True,
     debug_labels: bool = False,
+    speech_clips: list[SpeechClip] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic JSON-compatible scene description."""
 
@@ -279,7 +280,7 @@ def build_scene(
             scene["validation_checks"].append({"kind": "short_text", "start_frame": flash_start, "end_frame": flash_start + 4, "maximum_duration_ms": 200})
             dialogue = [("B", 570, f"The {palette[3]} {kinds[0]} is missing, not the {palette[2]} one.")]
 
-    _add_dialogue(scene, dialogue, include_tts_timing)
+    _add_dialogue(scene, dialogue, include_tts_timing, speech_clips)
     scene["provenance"] = {
         "generator": "witness.scene.build_scene",
         "seed": seed,
@@ -290,12 +291,15 @@ def build_scene(
     return scene
 
 
-def _add_dialogue(scene: dict[str, Any], plans: list[tuple[str, int, str]], include_timing: bool) -> None:
+def _add_dialogue(scene: dict[str, Any], plans: list[tuple[str, int, str]], include_timing: bool,
+                  speech_clips: list[SpeechClip] | None = None) -> None:
     for speaker, start_frame, text in plans:
         if include_timing:
             actor = next(actor for actor in scene["actors"] if actor["id"] == speaker)
             rate = 150 if actor["shape"] == "square" else 160
             clip = synthesize(text, voice="en-us", rate=rate)
+            if speech_clips is not None:
+                speech_clips.append(clip)
             if clip.sample_rate != AUDIO_RATE:
                 raise RuntimeError(f"unexpected eSpeak sample rate {clip.sample_rate}; expected {AUDIO_RATE}")
             start_sample = round(start_frame / FPS * AUDIO_RATE)

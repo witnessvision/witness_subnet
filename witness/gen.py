@@ -12,11 +12,14 @@ from .scene import build_scene
 
 def generate(seed: int, tier: int, output: Path, *, debug_labels: bool = False) -> tuple[Path, Path]:
     output.mkdir(parents=True, exist_ok=True)
-    scene = build_scene(seed, tier, debug_labels=debug_labels)
+    # eSpeak can vary across invocations. Render the exact PCM whose duration
+    # created the scene contract instead of synthesizing the same text twice.
+    speech_clips = []
+    scene = build_scene(seed, tier, debug_labels=debug_labels, speech_clips=speech_clips)
     scene_path = output / "scene.json"
     video_path = output / "video.mp4"
     scene_path.write_text(json.dumps(scene, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    render_video(scene, video_path)
+    render_video(scene, video_path, speech_clips=speech_clips)
     return scene_path, video_path
 
 

@@ -2,19 +2,22 @@
 
 import asyncio
 import math
-from typing import Any
+from pathlib import Path
+from typing import Any, Tuple
 
 import typer
 
 from .chain import BittensorChainAdapter
 from .protocol import WitnessTask
+from .feedback import FeedbackReceiver
 
 
 class WitnessMiner:
     """Subclass reconstruct() to implement a miner using the assigned tools."""
 
     def __init__(self, *, chain=None, concurrency: int = 1,
-                 max_deadline_s: float = 300.0, allow_unregistered: bool = False):
+                 max_deadline_s: float = 300.0, allow_unregistered: bool = False,
+                 feedback_dir: Path | None = None):
         if concurrency < 1:
             raise ValueError("concurrency must be at least one")
         if not math.isfinite(max_deadline_s) or max_deadline_s <= 0:
@@ -24,6 +27,7 @@ class WitnessMiner:
         self.max_deadline_s = max_deadline_s
         self.allow_unregistered = allow_unregistered
         self._active = 0
+        self.feedback = FeedbackReceiver(chain=chain, feedback_dir=feedback_dir)
 
     async def reconstruct(self, task: WitnessTask) -> dict[str, Any]:
         """Return an empty valid response. Replace with nonblocking inference.
@@ -63,7 +67,7 @@ class WitnessMiner:
             self._active -= 1
         return synapse
 
-    async def blacklist(self, synapse: WitnessTask) -> tuple[bool, str]:
+    async def blacklist(self, synapse: WitnessTask) -> Tuple[bool, str]:
         hotkey = str(getattr(synapse.dendrite, "hotkey", "") or "")
         if not hotkey:
             return True, "missing caller hotkey"
@@ -93,16 +97,18 @@ def run(
     concurrency: int = typer.Option(1, min=1),
     max_deadline_s: float = typer.Option(300.0, min=1),
     allow_unregistered: bool = typer.Option(False),
+    feedback_dir: Path = typer.Option(Path("feedback"), envvar="WITNESS_FEEDBACK_DIR"),
 ) -> None:
     """Serve empty responses until reconstruct() is implemented."""
     chain = BittensorChainAdapter(netuid=netuid, network=network,
         wallet_name=wallet_name, wallet_hotkey=wallet_hotkey,
         wallet_path=wallet_path, with_dendrite=False)
     miner = WitnessMiner(chain=chain, concurrency=concurrency,
-        max_deadline_s=max_deadline_s, allow_unregistered=allow_unregistered)
+        max_deadline_s=max_deadline_s, allow_unregistered=allow_unregistered,
+        feedback_dir=feedback_dir)
     axon = chain.serve_axon(forward_fn=miner.forward, blacklist_fn=miner.blacklist,
         priority_fn=miner.priority, port=port, host=host, external_ip=external_ip,
-        external_port=external_port, max_workers=concurrency)
+        external_port=external_port, max_workers=concurrency, feedback_receiver=miner.feedback)
     typer.echo(f"Witness base miner serving on port {port}; no inference configured")
     async def wait():
         while True:

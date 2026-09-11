@@ -85,3 +85,22 @@ def test_qa_entity_references_are_observable() -> None:
 def test_generated_media_passes_validation(tmp_path) -> None:
     scene_path, video_path = generate(41, 1, tmp_path / "scene_41")
     assert validate(scene_path, video_path) == []
+
+
+def test_generation_renders_original_speech_without_a_second_synthesis(tmp_path, monkeypatch):
+    from witness import render
+    monkeypatch.setattr(render, "synthesize", lambda *a, **kw: pytest.fail("synthesized speech twice"))
+    scene_path, video_path = generate(41, 1, tmp_path / "scene")
+    assert validate(scene_path, video_path) == []
+
+
+def test_reused_speech_still_enforces_the_timing_contract():
+    from witness.render import compose_audio
+    from witness.tts import SpeechClip
+    clips = []
+    scene = build_scene(41, 1, speech_clips=clips)
+    compose_audio(scene, speech_clips=clips)
+    first = clips[0]
+    clips[0] = SpeechClip(first.samples[:-1], first.sample_rate, first.engine, first.voice)
+    with pytest.raises(RuntimeError, match="length changed"):
+        compose_audio(scene, speech_clips=clips)

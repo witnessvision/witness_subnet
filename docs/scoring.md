@@ -6,17 +6,15 @@ For the CPU-only SN20 setup, start with the [validator guide](validator.md).
 
 For each session, validator cost is snapshotted from the server-owned store
 under its lock when the task closes. JSONL logs retain the audit trail. Miner
-cost claims are never used. The full-reward threshold is:
+cost claims are never used. Production **Witness Scorer v1.1.0** uses a fixed,
+inclusive quality threshold in every tier:
 
 ```text
-threshold = max(tier_minimum, 0.35, 0.8 * best_quality_for_scene)
-full_reward = quality >= threshold
+reward before duplicates = quality * efficiency if quality >= 0.4 else 0
 ```
 
-The frozen tier minima are 0.70 / 0.65 / 0.60 for tiers 1 / 2 / 3. A
-relative gate cannot weaken them. Production v1.0.0 also grants tapered partial
-credit immediately below this threshold, as specified below. Historical v1.5
-uses a hard gate. Degraded Observer responses receive no reward.
+There is no partial band or peer-relative threshold in this version.
+Missing, invalid or degraded responses receive zero reward.
 Sessions are created directly by the validator store; the public tool server
 rejects `POST /session`. Sessions are removed when their task finishes.
 
@@ -36,7 +34,7 @@ the entire remaining 30% to one miner. The equivalent environment setting is
 `--no-set-weights`; the allocation policy does not enable submissions.
 
 The mainnet preset uses aggregation/weight policy v1.1.0: the mean of the last
-five round rewards, then an EMA with alpha 0.1. `--score-window` and `--ema-alpha`
+five round rewards, then an EMA with alpha 0.2. `--score-window` and `--ema-alpha`
 configure these values. The first positive window mean initializes the EMA
 directly; zero rounds count toward the mean. See the [validator guide](validator.md)
 for the formula, persisted history and upgrade instructions. Advanced mode without
@@ -90,9 +88,9 @@ seconds, and returned transcript characters. The scorer's efficiency factor is
 `max(0, 1 - 0.30 * total_cost / cost_ref)`.
 ## Scoring and observation identity
 
-The default scorer is production `1.0.0`; select it explicitly with
-`--score-version 1.0.0`. It does not require candidate diagnostic mode.
-Historical scoring remains explicitly selectable, including `1.5` and
+The default scorer is production `1.1.0`; select it explicitly with
+`--score-version 1.1.0`. It does not require candidate diagnostic mode.
+Historical scoring remains explicitly selectable, including `1.0.0`, `1.5` and
 `1.9-candidate`; research versions require `--allow-unlocked`.
 Pass `--benchmark-lock PATH` to verify a particular frozen corpus. An explicit
 missing or altered lock still fails closed unless `--allow-unlocked` is given.
@@ -108,7 +106,22 @@ round root or an explicitly verified migration; the validator refuses to blend i
 creating a round or querying miners. Legacy unversioned EMA files remain readable
 only with the historical 1.5/legacy-label configuration.
 
-### Production scorer v1.0.0
+### Production scorer v1.1.0
+
+Quality and metered efficiency are unchanged from v1.0.0. Every scene with
+quality at least `0.4` receives `quality * efficiency` before duplicate sharing;
+scenes below `0.4` receive zero. All assigned scenes, including failures and
+below-threshold scenes, remain in the round mean. The threshold is independent
+of tier and other miners. Empty responses still fail this gate on the current
+synthetic workload; this is not a guarantee about every possible future corpus.
+
+`gate.passed` identifies the inclusive fixed gate and `gate.reward_factor` is
+always zero or one. `score_before_duplicates` and the final `score` expose the
+complete reward calculation. Upgrading from v1.0.0 requires new history; keep
+old artifacts and reconcile pending submissions before changing the round root.
+Scorer and aggregation versions are separate identities.
+
+### Historical production scorer v1.0.0
 
 **Witness Scorer v1.0.0** is the first production release of the contract used in
 the mainnet evaluation. It promotes `1.9-candidate` without changing numerical
@@ -148,8 +161,7 @@ Below the floor reward is zero; at or above the original threshold reward is
 unchanged. `gate.passed` still means the full threshold was reached, while
 `gate.reward_factor` exposes partial credit. Invalid/missing responses remain
 zero and duplicate sharing still applies. `1.9-candidate` preserves this same
-reward calculation and its historical version label. Production v1.0.0 is now
-the default; earlier scoring contracts retain their numerical behavior.
+reward calculation and its historical version label. Production v1.0.0 remains explicitly selectable with its original numerical behavior.
 
 `scoring_identity.version` records `1.0.0`. A production scorer can still evaluate
 diagnostic inputs: `--allow-unlocked` keeps `scoring_identity.mode=diagnostic`.

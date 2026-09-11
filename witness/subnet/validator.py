@@ -28,11 +28,15 @@ from witness.recompose.generator import generate_recomposition
 from witness.score import score_reconstruction
 from witness.score.scorer import DEFAULT_Q_MIN
 from witness.reward import REWARD_VERSION, reward_metrics, summarize_records
-from witness.score_v1_0_0 import SCORER_VERSION, score_reconstruction as production_scorer
+from witness.score_v1_0_0 import score_reconstruction as legacy_production_scorer
+from witness.score_v1_1_0 import (SCORER_VERSION, QUALITY_THRESHOLD,
+                                  reward_metrics as fixed_reward_metrics,
+                                  score_reconstruction as production_scorer)
 from witness.tools.server import Budget, create_app
 
 from .chain import BittensorChainAdapter, ChainAdapter, InMemoryChainAdapter, MinerEndpoint, WeightSubmission
-from .protocol import WitnessTask
+from .protocol import WitnessFeedback, WitnessTask
+from .feedback import round_feedback
 from .history import rolling_mean_ema
 
 
@@ -89,9 +93,9 @@ class ValidatorConfig:
     transcript_source: str = "legacy_labels"
 
     def validate(self) -> None:
-        if self.score_version not in {SCORER_VERSION, "1.5", "1.6-candidate", "1.7-candidate", "1.8", REWARD_VERSION}:
+        if self.score_version not in {SCORER_VERSION, "1.0.0", "1.5", "1.6-candidate", "1.7-candidate", "1.8", REWARD_VERSION}:
             raise ValueError("unknown score_version")
-        if self.score_version not in {SCORER_VERSION, "1.5"} and not self.allow_unlocked:
+        if self.score_version not in {SCORER_VERSION, "1.0.0", "1.5"} and not self.allow_unlocked:
             raise ValueError("candidate scoring requires explicit allow_unlocked diagnostic mode")
         if self.transcript_source not in {"legacy_labels", "asr", "none"}:
             raise ValueError("unknown transcript_source")
@@ -273,6 +277,21 @@ def reconstruction_hash(reconstruction: Mapping[str, Any]) -> str:
 
 
 def apply_relative_gate(records: list[dict[str, Any]], *, score_version: str = SCORER_VERSION) -> None:
+    if score_version == SCORER_VERSION:
+        for record in records:
+            metrics = fixed_reward_metrics(float(record["quality"]),
+                                           float(record["efficiency_factor"]),
+                                           valid=bool(record["responded"]))
+            record["gate"] = {
+                "policy": "fixed", "threshold": QUALITY_THRESHOLD,
+                "absolute_minimum": QUALITY_THRESHOLD,
+                "passed": metrics["full_reward_eligible"],
+                "partial_floor": QUALITY_THRESHOLD,
+                "reward_factor": metrics["reward_factor"],
+            }
+            record["metrics"] = metrics
+            record["score_before_duplicates"] = metrics["score"]
+        return
     by_scene: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_scene.setdefault(str(record["scene_id"]), []).append(record)
@@ -300,7 +319,7 @@ def apply_relative_gate(records: list[dict[str, Any]], *, score_version: str = S
                 float(record["quality"]), float(record["efficiency_factor"]),
                 effective_threshold, valid=bool(record["responded"]),
             )
-            if score_version in {SCORER_VERSION, REWARD_VERSION}:
+            if score_version in {"1.0.0", REWARD_VERSION}:
                 record["score_before_duplicates"] = record["metrics"]["score"]
                 record["gate"].update(
                     partial_floor=record["metrics"]["partial_floor"],
@@ -422,6 +441,8 @@ class WitnessValidator:
         self.scorer = score_reconstruction
         if config.score_version == SCORER_VERSION:
             self.scorer = production_scorer
+        elif config.score_version == "1.0.0":
+            self.scorer = legacy_production_scorer
         elif config.score_version == "1.6-candidate":
             from witness.score_v16 import score_reconstruction as scorer
             self.scorer = scorer
@@ -444,10 +465,10 @@ class WitnessValidator:
                    for name, path in (("contract", "witness/contract.py"), ("metering", "witness/tools/metering.py"))},
             },
             "mode": "diagnostic" if config.allow_unlocked else (
-                "production" if config.score_version == SCORER_VERSION else "legacy"),
+                "production" if config.score_version in {SCORER_VERSION, "1.0.0"} else "legacy"),
             "lock_verification": "required" if config.benchmark_lock is not None and not config.allow_unlocked else "disabled_or_diagnostic",
         }
-        if config.score_version in {SCORER_VERSION, REWARD_VERSION}:
+        if config.score_version in {SCORER_VERSION, "1.0.0", REWARD_VERSION}:
             self.scoring_identity["code_sha256"].update({
                 name: hashlib.sha256((REPOSITORY_ROOT / path).read_bytes()).hexdigest()
                 for name, path in (("quality_v18", "witness/score_v18.py"),
@@ -695,6 +716,34 @@ class WitnessValidator:
                        round_history)
         artifact["ema_updated"] = True
         self._write_json(round_dir / "round.json", artifact)
+        # Weights and history are durably recorded before optional peer I/O.
+        # Legacy miners may not implement this route; that never changes rewards.
+        artifact["feedback"] = {"status": "prepared", "deliveries": {}}
+        self._write_json(round_dir / "round.json", artifact)
+        try:
+            report = round_feedback(artifact)
+            self._write_json(round_dir / "feedback.json", report.model_dump())
+            deliveries = artifact["feedback"]["deliveries"]
+            semaphore = asyncio.Semaphore(16)
+
+            async def deliver(endpoint):
+                if endpoint.uid == self.config.burn_uid:
+                    deliveries[str(endpoint.uid)] = {"status": "skipped_burn"}
+                    return
+                deliveries[str(endpoint.uid)] = {"status": "pending"}
+                async with semaphore:
+                    try:
+                        deliveries[str(endpoint.uid)] = await asyncio.wait_for(
+                            self.chain.send_feedback(endpoint, WitnessFeedback(report=report), timeout=5.0),
+                            timeout=5.0)
+                    except Exception as exc:
+                        deliveries[str(endpoint.uid)] = {"status": "failed", "error_type": type(exc).__name__}
+
+            await asyncio.wait_for(asyncio.gather(*(deliver(e) for e in endpoints)), timeout=60.0)
+            artifact["feedback"]["status"] = "completed"
+        except Exception as exc:
+            artifact["feedback"].update(status="failed", error_type=type(exc).__name__)
+        self._write_json(round_dir / "round.json", artifact)
         return artifact
 
     async def run_forever(self) -> None:
@@ -898,7 +947,7 @@ def run(
     tool_public_url: str | None = typer.Option(None, envvar="WITNESS_TOOL_PUBLIC_URL"),
     deadline_s: float = typer.Option(180.0, min=1),
     ema_alpha: float | None = typer.Option(None, min=0.000001, max=1, envvar="WITNESS_EMA_ALPHA",
-                                          help="EMA alpha: mainnet default 0.1, advanced default 0.3."),
+                                          help="EMA alpha: mainnet default 0.2, advanced default 0.3."),
     score_window: int | None = typer.Option(None, min=1, envvar="WITNESS_SCORE_WINDOW",
                                             help="Mean of the last N rounds before EMA; mainnet default 5."),
     burn_uid: int | None = typer.Option(None, envvar="WITNESS_BURN_UID"),
@@ -922,7 +971,7 @@ def run(
     dry_run: bool = typer.Option(False, help="Use the local base miner and no chain"),
     mainnet: bool = typer.Option(False, "--mainnet", envvar="WITNESS_MAINNET",
                                 help="CPU-only SN20 preset: five fresh scenes, 70% burn / 30% one winner per epoch."),
-    score_version: str = typer.Option(SCORER_VERSION, help="Production 1.0.0; historical 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
+    score_version: str = typer.Option(SCORER_VERSION, help="Production 1.1.0; historical 1.0.0, 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
     transcript_source: str = typer.Option("legacy_labels", help="legacy_labels, asr or none"),
     once: bool = typer.Option(False, help="Run one round and exit"),
 ) -> None:
@@ -936,11 +985,12 @@ def run(
         live = MainnetChainAdapter(netuid=20, network=network, wallet_name=wallet_name,
                                    wallet_hotkey=wallet_hotkey, wallet_path=wallet_path)
         try:
-            preset = mainnet_config(round_root=round_root if round_root != Path("rounds") else Path("rounds/mainnet-v1"),
+            preset = mainnet_config(round_root=round_root if round_root != Path("rounds") else Path("rounds/mainnet-scorer-v1.1.0"),
                                     burn_uid=live.burn_uid, tool_host=tool_host, tool_port=tool_port,
                                     tool_public_url=tool_public_url, set_weights_enabled=set_weights_enabled,
                                     score_window=5 if score_window is None else score_window,
-                                    ema_alpha=0.1 if ema_alpha is None else ema_alpha)
+                                    ema_alpha=0.2 if ema_alpha is None else ema_alpha,
+                                    score_version=score_version)
             validator = WitnessValidator(live, preset)
             if once:
                 artifact = asyncio.run(validator.run_round())

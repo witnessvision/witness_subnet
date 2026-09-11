@@ -108,3 +108,27 @@ Unregistered callers are rejected by default. `--allow-unregistered` is for
 isolated development only. Keep wallet material and provider credentials outside
 source control. Verify schema validity, budget use, deadlines and cancellation
 before serving an implemented miner. Production reward validation remains open.
+
+
+## Round feedback
+
+The second route, `WitnessFeedback`, carries a signed numerical report after
+round scoring and weight submission. Every evaluated miner receives the same
+report: all miners' identities, per-scene component scores, costs, gate and
+duplicate effects, rewards, window means, EMA and proposed weights. It contains
+no solutions or observation-session credentials. Submission status is included;
+`weights_applied` remains null until separately verified on chain.
+
+The base CLI attaches both routes and writes the latest report per validator to
+`--feedback-dir feedback` (or `WITNESS_FEEDBACK_DIR`). Filenames are SHA-256 hashes
+of validator hotkeys; each JSON includes its validator and round identity.
+Files use mode `0600`. The receiver requires a registered validator permit and
+binds the claimed identity to the SDK-authenticated caller. Reports from different
+validators remain separate; feedback does not modify reconstruction behavior.
+
+Custom miners using `chain.serve_axon(...)` should pass
+`feedback_receiver=miner.feedback`. Existing miners with their own axon setup can
+instantiate `FeedbackReceiver` from `witness.subnet.feedback` and attach its
+`forward`, `blacklist` and `priority` callbacks as an additional route.
+Miners without the route remain compatible with reconstruction tasks; their
+feedback delivery is recorded as unaccepted without changing their scores.

@@ -107,9 +107,9 @@ def test_offline_miner_gets_zero_round_without_erasing_history(tmp_path, generat
     result = asyncio.run(v.run_round())
     assert result["weights"] == {"uids": [240], "values": [1]}
     assert result["aggregation_identity"]["window_rounds"] == 5
-    assert result["scoring_identity"]["version"] == "1.0.0"
+    assert result["scoring_identity"]["version"] == "1.1.0"
     scores, history, keys = WitnessValidator(chain, config)._load_score_state({"7": "seven", "240": "burn"})
-    assert scores["7"] == pytest.approx(.76)
+    assert scores["7"] == pytest.approx(.72)
     assert history["7"] == [.8, 0]
     assert keys["7"] == "seven"
     assert chain.weight_history == []

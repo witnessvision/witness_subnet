@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .scene import COLORS, state_at
-from .tts import synthesize
+from .tts import SpeechClip, synthesize
 
 FFMPEG = Path(
     os.environ.get("WITNESS_FFMPEG")
@@ -169,12 +169,17 @@ def _event_sound(kind: str, length: int, sample_rate: int) -> np.ndarray:
     return signal.astype(np.float32)
 
 
-def compose_audio(scene: dict[str, Any]) -> np.ndarray:
+def compose_audio(scene: dict[str, Any], *, speech_clips: list[SpeechClip] | None = None) -> np.ndarray:
     sample_rate = scene["audio"]["sample_rate"]
     total = round(scene["duration_frames"] / scene["fps"] * sample_rate)
     mix = np.zeros(total, dtype=np.float32)
-    for item in scene["dialogue"]:
-        clip = synthesize(item["text"], voice=item["tts"]["voice"], rate=item["tts"]["rate"])
+    if speech_clips is not None and len(speech_clips) != len(scene["dialogue"]):
+        raise ValueError("speech clips must match the scene dialogue")
+    for index, item in enumerate(scene["dialogue"]):
+        clip = (speech_clips[index] if speech_clips is not None else
+                synthesize(item["text"], voice=item["tts"]["voice"], rate=item["tts"]["rate"]))
+        if clip.sample_rate != sample_rate:
+            raise RuntimeError("TTS sample rate differs from the scene contract")
         if len(clip.samples) != item["end_sample"] - item["start_sample"]:
             raise RuntimeError("TTS output length changed after scene contract creation")
         start, end = item["start_sample"], item["end_sample"]
@@ -188,10 +193,10 @@ def compose_audio(scene: dict[str, Any]) -> np.ndarray:
     return (mix * 32767).astype(np.int16)
 
 
-def render_video(scene: dict[str, Any], target: Path) -> None:
+def render_video(scene: dict[str, Any], target: Path, *, speech_clips: list[SpeechClip] | None = None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     width, height = scene["resolution"]
-    audio = compose_audio(scene)
+    audio = compose_audio(scene, speech_clips=speech_clips)
     with tempfile.TemporaryDirectory(prefix="witness-render-") as temp_dir:
         wav_path = Path(temp_dir) / "audio.wav"
         with wave.open(str(wav_path), "wb") as wav:
