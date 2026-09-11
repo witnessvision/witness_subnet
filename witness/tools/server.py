@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from fractions import Fraction
 import hashlib
 import io
 import json
+import math
 import random
 import subprocess
 import tempfile
@@ -273,6 +275,49 @@ def _extract_frame(video: Path, t: float, width: int, height: int, ffmpeg: Path)
     )
 
 
+def _extract_frames(video: Path, timestamps: list[float], width: int, height: int,
+                    source_fps: float, ffmpeg: Path) -> list[bytes]:
+    """Decode CFR scene frames in bounded batches, preserving seek-to-frame timing."""
+    metadata = json.loads(_run_ffmpeg([str(ffmpeg.with_name('ffprobe')), '-v', 'error',
+        '-select_streams', 'v:0', '-show_entries',
+        'stream=time_base,start_time,r_frame_rate,avg_frame_rate', '-of', 'json', str(video)]))
+    stream = metadata['streams'][0]
+    fps = Fraction(str(source_fps))
+    if (Fraction(stream['r_frame_rate']) != fps or Fraction(stream['avg_frame_rate']) != fps
+            or float(stream.get('start_time', 0)) != 0):
+        raise ValueError('grounded batch requires a zero-origin constant-rate video')
+    time_base = Fraction(stream['time_base'])
+    # -ss parses microseconds, then rounds to the stream time base. Preserve that
+    # boundary behavior even when a requested time lies just after a frame PTS.
+    def frame_number(timestamp: float) -> int:
+        microseconds = int(Fraction(f'{timestamp:.9f}') * 1_000_000)
+        ticks = math.floor(Fraction(microseconds, 1_000_000) / time_base + Fraction(1, 2))
+        return math.ceil(ticks * time_base * fps)
+    numbers = [frame_number(timestamp) for timestamp in timestamps]
+    unique = sorted(set(numbers))
+    images: dict[int, bytes] = {}
+
+    def expression(items: list[int]) -> str:
+        if len(items) == 1:
+            return f'eq(n\\,{items[0]})'
+        middle = len(items) // 2
+        return f'({expression(items[:middle])}+{expression(items[middle:])})'
+
+    for start in range(0, len(unique), 512):
+        selected = unique[start:start + 512]
+        with tempfile.TemporaryDirectory(prefix='witness-frames-') as directory:
+            pattern = str(Path(directory) / '%06d.jpg')
+            _run_ffmpeg([str(ffmpeg), '-hide_banner', '-loglevel', 'error',
+                '-i', str(video), '-frames:v', str(len(selected)),
+                '-vf', f'select={expression(selected)},scale={width}:{height}:flags=lanczos',
+                '-fps_mode', 'passthrough', '-q:v', '2', '-vcodec', 'mjpeg', pattern])
+            paths = sorted(Path(directory).glob('*.jpg'))
+            if len(paths) != len(selected):
+                raise RuntimeError('frame batch did not decode every requested timestamp')
+            images.update((number, path.read_bytes()) for number, path in zip(selected, paths))
+    return [images[number] for number in numbers]
+
+
 def _extract_audio(
     video: Path,
     t0: float,
@@ -473,10 +518,12 @@ def create_app(
         try:
             output = io.BytesIO()
             with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-                for index, timestamp in enumerate(timestamps):
-                    jpeg = _extract_frame(
-                        session.scene.video_path, timestamp, width, height, ffmpeg
-                    )
+                images = (_extract_frames(session.scene.video_path, timestamps, width, height,
+                                          float(session.scene.truth['fps']), ffmpeg)
+                          if session.scene.truth.get('schema_version') == '3.0' else
+                          [_extract_frame(session.scene.video_path, timestamp, width, height, ffmpeg)
+                           for timestamp in timestamps])
+                for index, jpeg in enumerate(images):
                     archive.writestr(f"frame_{index:06d}.jpg", jpeg)
                 manifest = {
                     "timestamps": [round(value, 9) for value in timestamps],

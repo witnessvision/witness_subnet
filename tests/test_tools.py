@@ -92,6 +92,37 @@ def test_visual_metering_uses_ceil_fourteen_pixel_patches() -> None:
     assert visual_token_cost(640, 360) == 46 * 26
 
 
+def test_batch_matches_individual_seek_frames_and_repeated_samples():
+    from witness.tools.server import _extract_frame, _extract_frames, DEFAULT_FFMPEG
+    video = SCENES / 'scene_101' / 'video.mp4'
+    timestamps = [0., .001, .04, 1 / 24, .041667, 1/24+.000041, 1/24+.000042,
+                  3., 3.001, 3.125, 7.499,
+                  7.5, 7.501, 15.125, 24.958333333]
+    ffmpeg = Path(DEFAULT_FFMPEG)
+    batched = _extract_frames(video, timestamps, 160, 90, 24., ffmpeg)
+    singles = [_extract_frame(video, value, 160, 90, ffmpeg) for value in timestamps]
+    assert batched == singles
+
+
+def test_grounded_batch_keeps_archive_order_and_cost_across_decoder_batches(tmp_path):
+    from witness.tools.server import _extract_frame, DEFAULT_FFMPEG
+    app = create_app(SCENES, log_dir=tmp_path/'logs')
+    # This fixture is also a zero-origin CFR render; select the versioned path.
+    app.state.store.scenes['scene_101'].truth['schema_version'] = '3.0'
+    client = TestClient(app)
+    session = client.post('/session', json={'scene_id': 'scene_101', 'budget': _budget()}).json()
+    response = client.get(f'/s/{session["session_id"]}/frames',
+        params={'t0': 0., 't1': 520/24, 'fps': 24, 'res': '14x14'})
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        manifest = json.loads(archive.read('manifest.json'))
+        assert len(manifest['timestamps']) == 520
+        assert manifest['cost']['visual_tokens'] == 520
+        for index in [0, 511, 512, 519]:
+            assert archive.read(f'frame_{index:06d}.jpg') == _extract_frame(
+                SCENES/'scene_101/video.mp4', index/24, 14, 14, Path(DEFAULT_FFMPEG))
+
+
 def test_frame_batch_near_fractional_scene_end_clamps_to_last_frame(tmp_path: Path) -> None:
     app = create_app([REAL_SCENE_8202], log_dir=tmp_path / "logs")
     client = TestClient(app)
