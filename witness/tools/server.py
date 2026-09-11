@@ -37,6 +37,9 @@ DEFAULT_FFMPEG = (
     or "/usr/bin/ffmpeg"
 )
 COST_HEADER = "X-Witness-Cost"
+# Each active miner may issue concurrent HTTP requests. Bound decoder processes
+# independently of HTTP workers, and keep their native thread pools small.
+_FFMPEG_SLOTS = threading.BoundedSemaphore(4)
 
 
 class Budget(BaseModel):
@@ -242,7 +245,8 @@ def _cost_headers(cost: Cost) -> dict[str, str]:
 
 
 def _run_ffmpeg(command: list[str]) -> bytes:
-    result = subprocess.run(command, check=False, capture_output=True)
+    with _FFMPEG_SLOTS:
+        result = subprocess.run(command, check=False, capture_output=True)
     if result.returncode:
         message = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise RuntimeError(message[-1] if message else "ffmpeg failed")
@@ -256,6 +260,8 @@ def _extract_frame(video: Path, t: float, width: int, height: int, ffmpeg: Path)
             "-hide_banner",
             "-loglevel",
             "error",
+            "-threads", "1",
+            "-filter_threads", "1",
             "-ss",
             f"{t:.9f}",
             "-i",
@@ -266,6 +272,7 @@ def _extract_frame(video: Path, t: float, width: int, height: int, ffmpeg: Path)
             f"scale={width}:{height}:flags=lanczos",
             "-q:v",
             "2",
+            "-threads", "1",
             "-f",
             "image2pipe",
             "-vcodec",
@@ -308,9 +315,11 @@ def _extract_frames(video: Path, timestamps: list[float], width: int, height: in
         with tempfile.TemporaryDirectory(prefix='witness-frames-') as directory:
             pattern = str(Path(directory) / '%06d.jpg')
             _run_ffmpeg([str(ffmpeg), '-hide_banner', '-loglevel', 'error',
+                '-threads', '1', '-filter_threads', '1',
                 '-i', str(video), '-frames:v', str(len(selected)),
                 '-vf', f'select={expression(selected)},scale={width}:{height}:flags=lanczos',
-                '-fps_mode', 'passthrough', '-q:v', '2', '-vcodec', 'mjpeg', pattern])
+                '-fps_mode', 'passthrough', '-q:v', '2', '-threads', '1',
+                '-vcodec', 'mjpeg', pattern])
             paths = sorted(Path(directory).glob('*.jpg'))
             if len(paths) != len(selected):
                 raise RuntimeError('frame batch did not decode every requested timestamp')
@@ -333,6 +342,8 @@ def _extract_audio(
             "-hide_banner",
             "-loglevel",
             "error",
+            "-threads", "1",
+            "-filter_threads", "1",
             "-ss",
             f"{t0:.9f}",
             "-i",
@@ -342,6 +353,7 @@ def _extract_audio(
             "-vn",
             "-acodec",
             "pcm_s16le",
+            "-threads", "1",
             "-ar",
             str(sample_rate),
             "-ac",
