@@ -42,14 +42,15 @@ def test_population_includes_all_serving_miners_and_excludes_other_owner_hotkeys
     assert [e.uid for e in chain.miner_endpoints()] == [7, 240]
 
 
-def test_submit_exact_split_and_full_burn(monkeypatch):
+def test_submit_only_full_burn(monkeypatch):
     chain, _, sent = adapter(monkeypatch)
-    assert chain.set_weights([7, 240], [.3, .7]).status == "simulated"
+    assert chain.set_weights([240], [1]).status == "simulated"
     assert chain.set_weights([7, 240], [0, 1]).status == "simulated"
     assert len(sent) == 2
 
 
-@pytest.mark.parametrize("uids,weights", [([7, 240], [.5, .5]), ([7], [1]),
+@pytest.mark.parametrize("uids,weights", [([7, 240], [.3, .7]), ([7, 240], [1e-15, 1.0]),
+                                          ([240], [.9999999999]), ([7, 240], [.5, .5]), ([7], [1]),
                                           ([7, 7, 240], [.1, .2, .7]),
                                           ([7, 240], [float("nan"), .7])])
 def test_invalid_mainnet_vector_never_reaches_sdk(monkeypatch, uids, weights):
@@ -62,15 +63,15 @@ def test_invalid_mainnet_vector_never_reaches_sdk(monkeypatch, uids, weights):
 def test_rate_limit_records_definite_non_submission(monkeypatch):
     chain, state, sent = adapter(monkeypatch)
     state["blocks_until_submission"] = 80
-    assert chain.set_weights([7, 240], [.3, .7]).status == "rate_limited"
+    assert chain.set_weights([7, 240], [0, 1]).status == "rate_limited"
     assert sent == []
 
 
-def test_changed_hotkey_never_receives_previous_miner_weight(monkeypatch):
+def test_changed_burn_hotkey_never_receives_weight(monkeypatch):
     chain, _, sent = adapter(monkeypatch)
-    chain.selected[7] = "previous-miner"
+    chain.selected[240] = "previous-burn"
     with pytest.raises(RuntimeError, match="hotkey changed"):
-        chain.set_weights([7, 240], [.3, .7])
+        chain.set_weights([7, 240], [0, 1])
     assert sent == []
 
 
@@ -81,7 +82,7 @@ def test_preset_is_cpu_only_without_asr_or_hosted_generation(tmp_path):
     assert config.scene_count == 5 and config.programmatic_share == 1
     assert config.pool_manifest is None and config.source_scenes == ()
     assert config.transcript_source == "none" and config.score_version == "1.1.0"
-    assert config.weight_policy == "winner-takes-all" and config.burn_rate == .7
+    assert config.weight_policy == "winner-takes-all" and config.burn_rate == 1.0
     assert config.epoch_aligned and not config.set_weights_enabled
     assert config.score_window == 5 and config.ema_alpha == .2
 
@@ -95,7 +96,7 @@ def test_grounded_mainnet_requires_both_content_slices(tmp_path):
     config.validate()
     assert config.scene_count == 5 and config.programmatic_share == .6
     assert config.pool_manifest == tmp_path/"pool.json"
-    assert config.weight_policy == "winner-takes-all" and config.burn_rate == .7
+    assert config.weight_policy == "winner-takes-all" and config.burn_rate == 1.0
     assert config.score_window == 5 and config.ema_alpha == .2
 
 

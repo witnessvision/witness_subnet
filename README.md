@@ -107,7 +107,7 @@ duplicate handling and weight submission behavior.
   `reconstruct(task)` in your own package, and verify budgets and deadlines locally.
 - **Validators:** follow the [CPU-only SN20 setup](docs/validator.md). No GPU or
   OpenAI/API key is needed. `--mainnet` prepares scenes automatically and applies
-  70% burn / 30% winner-takes-all weights.
+  100% burn weights; miner evaluations remain diagnostic.
 - **Developers and researchers:** review the public protocol and scoring code,
   reproduce local checks, and open issues or pull requests with focused findings.
 

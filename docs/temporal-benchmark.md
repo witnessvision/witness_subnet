@@ -21,7 +21,7 @@ their original meaning.
   Absent families must not give free quality. Temporal reconstruction is required
   in addition to the ordinary weighted reconstruction quality.
 - Retain the inclusive quality threshold `0.4`, metered observation efficiency,
-  five-round mean with EMA `0.2` and `70%` burn. Use a fresh scoring identity/history.
+  five-round mean with EMA `0.2` and `100%` burn. Use a fresh scoring identity/history.
 - Duplicate comparison must operate on scored meaning: equivalent entity names,
   list order, ignored fields and timestamp perturbations that preserve a match
   must not create independent credit.

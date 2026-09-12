@@ -57,25 +57,20 @@ class MainnetChainAdapter(BittensorChainAdapter):
             raise ValueError("Invalid weights")
         positive = {u: w for u, w in zip(uids, weights) if w > 0}
         burn_weight = positive.get(self.burn_uid, 0)
-        if not (len(positive) == 1 and math.isclose(burn_weight, 1.0) or
-                len(positive) == 2 and math.isclose(burn_weight, .7)
-                and math.isclose(sum(positive.values()), 1.0)):
-            raise ValueError("Mainnet requires 70% burn / 30% one winner, or full burn")
+        if len(positive) != 1 or burn_weight != 1.0:
+            raise ValueError("Mainnet requires 100% burn and no positive miner weights")
         state = burn_state(self, self.burn_uid)
         if state["blocks_until_submission"]:
             return WeightSubmission("rate_limited")  # definitely no network write
         p = self.subtensor.substrate
         def q(name: str, *args: Any) -> Any:
             return p.query("SubtensorModule", name, list(args), block_hash=state["block_hash"]).value
-        owner = q("SubnetOwner", self.netuid)
         for uid in positive:
             hotkey = q("Keys", self.netuid, uid)
             if self.selected.get(uid) != hotkey:
                 raise RuntimeError("Weight destination hotkey changed since evaluation")
-            if uid != self.burn_uid and q("Owner", hotkey) == owner:
-                raise RuntimeError("Winning hotkey became an owner burn destination")
         if q("MinAllowedWeights", self.netuid) > len(positive):
-            raise RuntimeError("Chain minimum weight count rejects this winner policy")
+            raise RuntimeError("Chain minimum weight count rejects the full-burn policy")
         if q("MaxWeightsLimit", self.netuid) != 65535:
             raise RuntimeError("Chain weight cap changed; verify the policy before submitting")
         return super().set_weights(uids, weights)
@@ -92,7 +87,7 @@ def mainnet_config(*, round_root, burn_uid, tool_host, tool_port, tool_public_ur
         round_root=round_root, scene_count=5, programmatic_share=.6 if grounded else 1.0,
         pool_manifest=pool_manifest if grounded else None,
         tool_host=tool_host, tool_port=tool_port, tool_public_url=tool_public_url,
-        burn_uid=burn_uid, burn_rate=.7, weight_policy="winner-takes-all",
+        burn_uid=burn_uid, burn_rate=1.0, weight_policy="winner-takes-all",
         transcript_source="none", allow_unlocked=True, epoch_aligned=True,
         query_concurrency=4, set_weights_enabled=set_weights_enabled,
         score_window=score_window, ema_alpha=ema_alpha, score_version=score_version,

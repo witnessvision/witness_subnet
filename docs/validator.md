@@ -85,15 +85,18 @@ for the next epoch instead of repeatedly querying miners.
 - Provides frames and audio. No transcript is supplied; miners may transcribe the
   audio themselves. The preset never exposes label-derived transcript hints.
 - Uses scorer 1.1.0 (fixed quality threshold 0.4) and aggregation 1.1.0: mean reward over the last five rounds,
-  followed by EMA alpha 0.2, with a 70% burn / 30% winner-takes-all allocation.
-- Selects the highest EMA among miners with positive reward in the current round.
-  Exact ties use lowest UID. The registered owner burn target is discovered from
-  the chain and cannot compete. If every miner has zero current-round reward,
-  **100% goes to burn and no winner is selected**, even if a miner has positive
-  historical EMA. Weights are never assigned randomly. The same full-burn fallback
-  applies whenever no miner qualifies.
+  followed by EMA alpha 0.2, with a 100% burn allocation. Positive miner weights are rejected by the mainnet adapter.
+- Retains miner scores and history for diagnostics. Every round assigns 100%
+  to the registered owner burn target, regardless of current or historical rewards.
 - Verifies the Finney chain, validator permit, owner burn destination and weight
-  constraints. It checks miner hotkeys again before submitting.
+  constraints. It checks the burn hotkey again before submitting.
+
+For continuous burn independent of evaluation duration, use the existing
+`--burn-only` mode in a separate process and run evaluations with
+`--mainnet --no-set-weights`. Keep exactly one weight writer. Stop the previous
+writer and reconcile pending commits before switching; a finalized commit is
+not proof of revealed weights. Verify the exclusive burn vector in finalized
+chain state and ensure no earlier mixed-allocation commit remains pending.
 
 The round window and EMA alpha are configurable with `--score-window 5 --ema-alpha 0.2`
 (or `WITNESS_SCORE_WINDOW` and `WITNESS_EMA_ALPHA`). Operators should agree on the

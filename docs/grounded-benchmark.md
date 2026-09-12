@@ -8,7 +8,7 @@ The base miner remains an empty, model-independent implementation.
 When explicitly selected with `--mainnet --score-version 3.0.0`, the preset
 requires a reviewed `--pool-manifest` and generates three interaction worlds
 and two natural tasks per round. It retains the five-round window, EMA 0.2 and
-existing 70% burn / 30% winner policy (full burn when nobody is eligible).
+mainnet 100% burn policy; miner evaluations do not receive weights.
 Use a fresh round-history directory when switching scorer versions.
 
 ## What the tasks measure

@@ -27,13 +27,15 @@ UID (or remains zero if none is configured).
 
 ### Winner takes all with a reserved burn share
 
-Select `--weight-policy winner-takes-all --burn-rate 0.70 --burn-uid BURN_UID`
+Outside the mainnet preset, select `--weight-policy winner-takes-all --burn-rate 0.70 --burn-uid BURN_UID`
 to reserve 70% of this validator's weight for the burn destination and assign
 the entire remaining 30% to one miner. The equivalent environment setting is
 `WITNESS_WEIGHT_POLICY=winner-takes-all`. Start verification with
 `--no-set-weights`; the allocation policy does not enable submissions.
 
-The mainnet preset uses aggregation/weight policy v1.1.0: the mean of the last
+The mainnet preset always assigns 100% to the verified owner burn UID and rejects
+any positive miner allocation, regardless of scores. Evaluation history remains
+available for diagnostics. Its score aggregation remains v1.1.0: the mean of the last
 five round rewards, then an EMA with alpha 0.2. `--score-window` and `--ema-alpha`
 configure these values. The first positive window mean initializes the EMA
 directly; zero rounds count toward the mean. See the [validator guide](validator.md)

@@ -1106,7 +1106,7 @@ def run(
     ),
     dry_run: bool = typer.Option(False, help="Use the local base miner and no chain"),
     mainnet: bool = typer.Option(False, "--mainnet", envvar="WITNESS_MAINNET",
-                                help="CPU-only SN20 preset: five fresh scenes, 70% burn / 30% one winner per epoch."),
+                                help="CPU-only SN20 preset: five fresh scenes, 100% burn; evaluations retained for diagnostics."),
     score_version: str = typer.Option(SCORER_VERSION, help="Production 1.1.0; local candidates 2.0.0 and 3.0.0; historical 1.0.0, 1.5, 1.6-candidate, 1.7-candidate, 1.8 or 1.9-candidate"),
     transcript_source: str = typer.Option("legacy_labels", help="legacy_labels, asr or none"),
     once: bool = typer.Option(False, help="Run one round and exit"),
