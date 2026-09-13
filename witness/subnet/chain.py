@@ -127,6 +127,9 @@ class BittensorChainAdapter:
     ) -> WitnessTask | None:
         if self.dendrite is None:
             raise RuntimeError("this adapter was created without a dendrite")
+        if task.task_spec.get("schema_version") == "5.0":
+            from .events_transport import query_bounded
+            return await query_bounded(self.dendrite, endpoint, task, timeout)
         responses = await self.dendrite(
             axons=[endpoint.axon],
             synapse=task,

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Tuple
 
 import typer
+from starlette.requests import Request
 
 from .chain import BittensorChainAdapter
 from .protocol import WitnessTask
@@ -40,29 +41,57 @@ class WitnessMiner:
         a second session or access validator labels. Propagate cancellation and
         bound external requests by the task deadline.
         """
+        if task.task_spec.get("schema_version") == "5.0":
+            return {"schema_version": "5.0", "events": []}
         return {"schema_version": "1.0", "events": [], "dialogue": [],
                 "shots": [], "on_screen_text": [], "audio_events": [],
                 "intentional_errors": [], "qa": {}}
 
-    async def forward(self, synapse: WitnessTask) -> WitnessTask:
+    async def _compute(self, synapse: WitnessTask, request: Request | None):
+        v5 = synapse.task_spec.get("schema_version") == "5.0"
+        limit = min(synapse.deadline_s, self.max_deadline_s, 170.0 if v5 else float("inf"))
+        if not v5 or request is None:
+            return await asyncio.wait_for(self.reconstruct(synapse), timeout=limit)
+        if synapse.timeout is not None:
+            limit = min(limit, synapse.timeout)
+        async def disconnected():
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    raise TimeoutError("validator disconnected")
+        work = asyncio.create_task(self.reconstruct(synapse))
+        disconnect = asyncio.create_task(disconnected())
+        try:
+            async with asyncio.timeout(limit):
+                done, _ = await asyncio.wait((work, disconnect), return_when=asyncio.FIRST_COMPLETED)
+                return await work if work in done else await disconnect
+        finally:
+            for pending in (work, disconnect):
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(work, disconnect, return_exceptions=True)
+
+    async def forward(self, synapse: WitnessTask, request: Request = None) -> WitnessTask:
         synapse.reconstruction = {}
         if self._active >= self.concurrency:
             synapse.trace_summary = {"status": "busy"}
             return synapse
         self._active += 1
         try:
-            result = await asyncio.wait_for(
-                self.reconstruct(synapse),
-                timeout=min(synapse.deadline_s, self.max_deadline_s),
-            )
+            v5 = synapse.task_spec.get("schema_version") == "5.0"
+            result = await self._compute(synapse, request)
             if not isinstance(result, dict):
                 raise TypeError("reconstruction must be an object")
+            if v5:
+                from witness.events import validate_events
+                validate_events(result, synapse.task_spec["duration"])
             synapse.reconstruction = result
             synapse.trace_summary = {"status": "ok"}
         except asyncio.TimeoutError:
             synapse.trace_summary = {"status": "deadline_exceeded"}
         except Exception as exc:
-            synapse.trace_summary = {"status": "error", "error_type": type(exc).__name__}
+            synapse.trace_summary = ({"status": "error"} if synapse.task_spec.get("schema_version") == "5.0"
+                                    else {"status": "error", "error_type": type(exc).__name__})
         finally:
             self._active -= 1
         return synapse

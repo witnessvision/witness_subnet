@@ -1,5 +1,6 @@
 # Local environment and build products
 .venv/
+/.venv
 __pycache__/
 .pytest_cache/
 *.py[cod]

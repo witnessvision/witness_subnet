@@ -9,7 +9,7 @@ from typing import Annotated, Any, ClassVar, Literal
 from urllib.parse import urlparse
 
 import bittensor as bt
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 _BUDGET_FIELDS = {"visual_tokens", "audio_seconds", "transcript_chars"}
@@ -23,6 +23,8 @@ class WitnessTask(bt.Synapse):
         "task_id", "tool_base_url", "session_id", "scene_id", "seed_commitment",
         "budget", "task_spec", "deadline_s",
     )
+    # Local transport evidence is excluded from serialization and signatures.
+    _transport_evidence: dict = PrivateAttr(default_factory=dict)
 
     @property
     def body_hash(self) -> str:
@@ -56,6 +58,14 @@ class WitnessTask(bt.Synapse):
     reconstruction: dict[str, Any] = Field(default_factory=dict)
     trace_summary: dict[str, Any] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def strict_v5_envelope(cls, value):
+        if isinstance(value, dict) and isinstance(value.get("task_spec"), dict):
+            if value["task_spec"].get("schema_version") == "5.0" and set(value)-set(cls.model_fields):
+                raise ValueError("unknown_v5_envelope_fields")
+        return value
+
     @field_validator("tool_base_url")
     @classmethod
     def validate_tool_url(cls, value: str) -> str:
@@ -82,6 +92,9 @@ class WitnessTask(bt.Synapse):
     @field_validator("task_spec")
     @classmethod
     def validate_public_task_spec(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if value.get("schema_version") == "5.0":
+            from witness.events import EventsTaskSpec
+            return EventsTaskSpec.model_validate(value).model_dump()
         if set(value) != _TASK_FIELDS:
             raise ValueError(f"task_spec fields must be exactly {sorted(_TASK_FIELDS)}")
         duration = value.get("duration")
@@ -202,10 +215,31 @@ class RoundFeedback(FeedbackModel):
     miners: list[FeedbackMiner] = Field(max_length=4096)
 
 
+class EventsFeedback(FeedbackModel):
+    """Only aggregate numerical feedback; no source IDs or per-event solutions."""
+    schema_version: Literal["5.0"] = "5.0"
+    scorer_version: Literal["5.0.0"] = "5.0.0"
+    round_id: str = Field(pattern=r"^v5-[a-f0-9]{32}$")
+    validator_hotkey: str = Field(min_length=1, max_length=128)
+    completed_at: str = Field(min_length=1, max_length=64)
+    planned: Literal[5] = 5
+    sent: int = Field(ge=0, le=5)
+    completed: int = Field(ge=0, le=5)
+    rejected: int = Field(ge=0, le=5)
+    expired: int = Field(ge=0, le=5)
+    scored: int = Field(ge=0, le=5)
+    f1: UnitScore | None
+    precision: UnitScore | None
+    recall: UnitScore | None
+    provisional: bool
+    burn_rate: Literal[1.0] = 1.0
+    weights_enabled: Literal[False] = False
+
+
 class WitnessFeedback(bt.Synapse):
     """Signed round feedback, delivered after scoring and weight submission."""
 
-    report: RoundFeedback
+    report: RoundFeedback | EventsFeedback
     accepted: bool = False
     required_hash_fields: ClassVar[tuple[str, ...]] = ("report",)
 

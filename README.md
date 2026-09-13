@@ -132,3 +132,20 @@ are declared in `pyproject.toml`.
 | `witness/recompose/`, `witness/sources/` | Validator-side scene preparation |
 | `tests/` | Public protocol and implementation checks |
 | `docs/` | Miner and validator onboarding |
+# Structured events v5
+
+The [full-clip HTTP transport 5.1](docs/mp4-transport.md) sends a standalone MP4
+directly to a miner without requiring chain access.
+
+The additive [v5 diagnostic contract](docs/structured-events-v5.md) defines
+point events, annotation-concordance scoring and a single-target epoch runner.
+It does not submit weights. Dataset and miner qualification are separate from
+implementation tests; existing protocol/scorer versions remain available.
+
+## Production MP4 protocol 5.2
+
+[Production validator and miner integration](docs/production-v5.2.md) describes hotkey-signed
+requests and responses, all announced endpoints, persistent five-clip rounds, Luna evaluation
+and fixed UTC daily budgets. The existing experimental 5.1 transport remains available.
+The separate weight writer requires calibration and production acceptance evidence before
+70% burn / 30% winner activation; incomplete comparisons select full burn.

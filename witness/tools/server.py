@@ -13,6 +13,7 @@ import random
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -94,6 +95,9 @@ class Session:
     budget: Budget
     log_path: Path
     cost: Cost = field(default_factory=Cost)
+    deadline_at: float | None = None
+    closed: threading.Event = field(default_factory=threading.Event)
+    failed_observations: int = 0
 
 
 class BudgetExceeded(Exception):
@@ -114,12 +118,13 @@ class SessionStore:
         self.sessions: dict[str, Session] = {}
         self.lock = threading.RLock()
 
-    def create(self, scene_id: str, budget: Budget) -> Session:
+    def create(self, scene_id: str, budget: Budget, *, deadline_at: float | None = None) -> Session:
         scene = self.scenes.get(scene_id)
         if scene is None:
             raise KeyError(scene_id)
         session_id = uuid.uuid4().hex
         session = Session(session_id, scene, budget, self.log_dir / f"{session_id}.jsonl")
+        session.deadline_at = deadline_at
         with self.lock:
             self.sessions[session_id] = session
             self._append(
@@ -134,13 +139,24 @@ class SessionStore:
     def get(self, session_id: str) -> Session:
         with self.lock:
             try:
-                return self.sessions[session_id]
+                session = self.sessions[session_id]
+                if session.closed.is_set() or (session.deadline_at is not None and time.monotonic() >= session.deadline_at):
+                    session.closed.set()
+                    raise SessionClosed()
+                return session
             except KeyError as exc:
                 raise KeyError(session_id) from exc
 
+    def close(self, session_id: str) -> Session:
+        with self.lock:
+            session = self.sessions.pop(session_id)
+            session.closed.set()
+            return session
+
     def charge(self, session: Session, endpoint: str, params: dict[str, Any], delta: Cost) -> None:
         with self.lock:
-            if self.sessions.get(session.session_id) is not session:
+            if (self.sessions.get(session.session_id) is not session or session.closed.is_set()
+                    or (session.deadline_at is not None and time.monotonic() >= session.deadline_at)):
                 raise SessionClosed()
             projected = session.cost + delta
             budget = session.budget
@@ -165,10 +181,15 @@ class SessionStore:
             self._append(session, endpoint, params, delta, status, charged=True)
 
     def rollback(
-        self, session: Session, endpoint: str, params: dict[str, Any], delta: Cost
+        self, session: Session, endpoint: str, params: dict[str, Any], delta: Cost,
+        *, infrastructure_error: bool = True,
     ) -> None:
         with self.lock:
-            session.cost = session.cost - delta
+            # A closed v5 receipt is final. Late callbacks cannot rewrite cost.
+            if not (session.scene.truth.get("schema_version") == "5.0" and session.closed.is_set()):
+                session.cost = session.cost - delta
+            if infrastructure_error:
+                session.failed_observations += 1
             self._append(session, endpoint, params, delta, 500, charged=False)
 
     def record_free(self, session: Session, endpoint: str, params: dict[str, Any]) -> None:
@@ -414,12 +435,32 @@ def create_app(
         raise ValueError(f"ffmpeg not found: {ffmpeg}")
 
     store = SessionStore(discover_scenes(scene_roots), Path(log_dir))
+    if any(s.truth.get("schema_version") == "5.0" for s in store.scenes.values()) and transcript_source != "none":
+        raise ValueError("v5 observations forbid validator transcripts, including legacy labels")
     observed = {
         scene_id: load_observed_transcript(scene.directory, scene.duration)
         for scene_id, scene in store.scenes.items()
     } if transcript_source == "asr" else {}
     app = FastAPI(title="Witness metered tool server", version="1.0")
     app.state.store = store
+
+    # Never reflect an invalid query, filesystem path, decoder diagnostic or
+    # annotation-derived metadata through errors. Generic errors are intentional.
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_request: Request, _exc: RequestValidationError):
+        return JSONResponse({"detail": "invalid observation request"}, status_code=422)
+
+    @app.exception_handler(Exception)
+    async def internal_error(_request: Request, _exc: Exception):
+        return JSONResponse({"detail": "observation unavailable"}, status_code=500)
+
+    @app.get("/health")
+    def health() -> dict:
+        v5 = all(s.truth.get("schema_version") == "5.0" for s in store.scenes.values())
+        return {"status": "ok", "schema_version": "5.0" if v5 else "legacy",
+                "scorer_version": "5.0.0" if v5 else None, "weights_enabled": False}
 
     @app.exception_handler(SessionClosed)
     async def session_closed_handler(_request: Request, _exc: SessionClosed) -> JSONResponse:
@@ -478,6 +519,8 @@ def create_app(
         session = session_or_404(session_id)
         store.record_free(session, "GET /meta", {})
         body = {"duration": session.scene.duration, "cost": session.cost.as_dict()}
+        if session.scene.truth.get("schema_version") == "5.0":
+            body["has_audio"] = session.scene.truth["has_audio"]
         return JSONResponse(body, headers=_cost_headers(session.cost))
 
     @app.get("/s/{session_id}/frame")
@@ -489,19 +532,30 @@ def create_app(
         params = {"t": t, "res": f"{width}x{height}"}
         delta = Cost(visual_tokens=visual_token_cost(width, height))
         store.charge(session, "GET /frame", params, delta)
+        observed_time = None
         try:
             last_frame_t = max(
                 0.0,
-                session.scene.duration - 1.0 / float(session.scene.truth["fps"]),
+                float(session.scene.truth.get("video_duration", session.scene.duration)) - 1.0 / float(session.scene.truth["fps"]),
             )
-            jpeg = _extract_frame(
-                session.scene.video_path, min(t, last_frame_t), width, height, ffmpeg
-            )
-        except Exception:
-            store.rollback(session, "GET /frame", params, delta)
+            if session.scene.truth.get("schema_version") == "5.0":
+                from .native_media import frame
+                jpeg, observed_time = frame(session, min(t, last_frame_t), width, height, ffmpeg)
+                if not jpeg:
+                    raise RuntimeError("empty video observation")
+            else:
+                jpeg = _extract_frame(
+                    session.scene.video_path, min(t, last_frame_t), width, height, ffmpeg
+                )
+        except Exception as exc:
+            store.rollback(session, "GET /frame", params, delta,
+                           infrastructure_error=not isinstance(exc, SessionClosed))
             raise
         store.finish(session, "GET /frame", params, delta)
-        return Response(jpeg, media_type="image/jpeg", headers=_cost_headers(session.cost))
+        headers = _cost_headers(session.cost)
+        if observed_time is not None:
+            headers["X-Witness-Observation-Time"] = str(round(observed_time, 9))
+        return Response(jpeg, media_type="image/jpeg", headers=headers)
 
     @app.get("/s/{session_id}/frames")
     def get_frames(
@@ -515,22 +569,30 @@ def create_app(
         interval_or_400(t0, t1, session.scene.duration)
         width, height = resolution_or_400(res)
         frame_count = int((t1 - t0) * fps - 1e-12) + 1
+        v5 = session.scene.truth.get("schema_version") == "5.0"
+        if v5 and frame_count > 512:
+            raise_api(400, "v5 frame requests are limited to 512 samples; use successive windows")
         timestamps = [t0 + index / fps for index in range(frame_count)]
         timestamps = [timestamp for timestamp in timestamps if timestamp < t1 - 1e-12]
         last_frame_t = max(
             0.0,
-            session.scene.duration - 1.0 / float(session.scene.truth["fps"]),
+            float(session.scene.truth.get("video_duration", session.scene.duration)) - 1.0 / float(session.scene.truth["fps"]),
         )
-        timestamps = list(
+        timestamps = ([round(timestamp,9) for timestamp in timestamps] if v5 else list(
             dict.fromkeys(round(min(timestamp, last_frame_t), 9) for timestamp in timestamps)
-        )
+        ))
         params = {"t0": t0, "t1": t1, "fps": fps, "res": f"{width}x{height}"}
         delta = Cost(visual_tokens=visual_token_cost(width, height, len(timestamps)))
         store.charge(session, "GET /frames", params, delta)
         try:
             output = io.BytesIO()
             with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-                images = (_extract_frames(session.scene.video_path, timestamps, width, height,
+                if v5:
+                    from .native_media import frames
+                    requested_timestamps = timestamps
+                    images, timestamps = frames(session, t0, t1, fps, width, height, len(timestamps), ffmpeg)
+                else:
+                    images = (_extract_frames(session.scene.video_path, timestamps, width, height,
                                           float(session.scene.truth['fps']), ffmpeg)
                           if session.scene.truth.get('schema_version') == '3.0' else
                           [_extract_frame(session.scene.video_path, timestamp, width, height, ffmpeg)
@@ -543,9 +605,12 @@ def create_app(
                     "cost": (session.cost).as_dict(),
                     "call_cost": delta.as_dict(),
                 }
+                if v5:
+                    manifest["requested_timestamps"] = requested_timestamps
                 archive.writestr("manifest.json", json.dumps(manifest, separators=(",", ":")))
-        except Exception:
-            store.rollback(session, "GET /frames", params, delta)
+        except Exception as exc:
+            store.rollback(session, "GET /frames", params, delta,
+                           infrastructure_error=not isinstance(exc, SessionClosed))
             raise
         store.finish(session, "GET /frames", params, delta)
         return Response(
@@ -556,21 +621,31 @@ def create_app(
     def get_audio(session_id: str, t0: float, t1: float) -> Response:
         session = session_or_404(session_id)
         interval_or_400(t0, t1, session.scene.duration)
+        v5 = session.scene.truth.get("schema_version") == "5.0"
+        if v5 and not session.scene.truth["has_audio"]:
+            return Response(status_code=204, headers=_cost_headers(session.cost))
+        if v5 and t1 - t0 > 300:
+            raise_api(400, "v5 audio requests are limited to 300 seconds; use successive windows")
         params = {"t0": t0, "t1": t1}
         delta = Cost(audio_seconds=t1 - t0)
         store.charge(session, "GET /audio", params, delta)
         audio_config = session.scene.truth.get("audio", {})
         try:
-            wav = _extract_audio(
-                session.scene.video_path,
-                t0,
-                t1,
-                int(audio_config.get("sample_rate", 22050)),
-                int(audio_config.get("channels", 1)),
-                ffmpeg,
-            )
-        except Exception:
-            store.rollback(session, "GET /audio", params, delta)
+            if v5:
+                from .native_media import audio
+                wav = audio(session, t0, t1, ffmpeg)
+            else:
+                wav = _extract_audio(
+                    session.scene.video_path,
+                    t0,
+                    t1,
+                    int(audio_config.get("sample_rate", 22050)),
+                    int(audio_config.get("channels", 1)),
+                    ffmpeg,
+                )
+        except Exception as exc:
+            store.rollback(session, "GET /audio", params, delta,
+                           infrastructure_error=not isinstance(exc, SessionClosed))
             raise
         store.finish(session, "GET /audio", params, delta)
         return Response(wav, media_type="audio/wav", headers=_cost_headers(session.cost))

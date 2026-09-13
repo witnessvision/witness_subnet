@@ -9,7 +9,8 @@ description = "Witness metered video-reconstruction Bittensor subnet"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==10.5.0",
+  "bittensor==10.5.0",
+  "cryptography==50.0.1",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "numpy==2.4.6",
