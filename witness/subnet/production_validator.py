@@ -36,6 +36,10 @@ class ProductionValidator:
     def __init__(self, chain, *, root: Path, jobs_factory, evaluate, evaluator_identity,
                  calibration, start_after_epoch=-1):
         self.chain, self.root, self.jobs_factory, self.evaluate = chain, root, jobs_factory, evaluate
+        # Encrypted wallet access may perform a synchronous password KDF. Resolve
+        # it before the network loop so other miners' deadlines include only
+        # transport/inference, never repeated validator key decryption.
+        self.signing_key = chain.wallet.hotkey
         self.identity = {"transport": "5.2", "netuid": chain.netuid,
                          "validator_hotkey": chain.validator_hotkey, "ema_alpha": .2,
                          "tasks_per_miner": 5, "global_dispatches": 4,
@@ -70,7 +74,7 @@ class ProductionValidator:
                     began = time.monotonic()
                     try:
                         received = await send_clip(endpoint["url"], clip, EventsTaskSpec.model_validate(job["spec"]),
-                            self.chain.wallet.hotkey, miner_hotkey=endpoint["hotkey"], netuid=self.chain.netuid,
+                            self.signing_key, miner_hotkey=endpoint["hotkey"], netuid=self.chain.netuid,
                             task_id=task["id"], on_dispatch=dispatched)
                         result.update(status="valid", response_valid=True, received=received,
                                       miner_elapsed_s=received["elapsed_s"], evaluation_status="pending")

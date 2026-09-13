@@ -134,3 +134,26 @@ def test_restart_never_retries_unknown_dispatch_or_catches_up_old_epoch(tmp_path
         assert len(sent)==6 and len(set(tid for _,_,tid in sent))==6
         v.close()
     asyncio.run(run())
+
+
+def test_encrypted_signer_resolved_once_before_network_loop(tmp_path, monkeypatch):
+    chain, create, sent, _ = fixture(tmp_path, monkeypatch, n=2)
+    class Wallet:
+        accesses = 0
+        @property
+        def hotkey(self):
+            self.accesses += 1
+            if self.accesses > 1:
+                raise RuntimeError('synchronous_password_kdf_during_dispatch')
+            return None
+    chain.wallet = Wallet()
+    async def run():
+        validator = create()
+        assert chain.wallet.accesses == 1
+        report = await validator.step()
+        assert report['complete'] and len(sent) == 10
+        chain.epoch += 1
+        assert (await validator.step())['complete'] and len(sent) == 20
+        assert chain.wallet.accesses == 1
+        validator.close()
+    asyncio.run(run())
