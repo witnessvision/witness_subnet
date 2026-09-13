@@ -157,3 +157,23 @@ def test_encrypted_signer_resolved_once_before_network_loop(tmp_path, monkeypatc
         assert chain.wallet.accesses == 1
         validator.close()
     asyncio.run(run())
+
+
+def test_source_failure_consumes_epoch_and_invalidates_previous_weights(tmp_path, monkeypatch):
+    from witness.subnet.production_weights import read_latest
+    chain, create, sent, _ = fixture(tmp_path, monkeypatch, n=1)
+    async def run():
+        v=create()
+        assert (await v.step())['complete']
+        assert read_latest(v.root/'scheduler.sqlite3') is not None
+        chain.epoch+=1
+        async def unavailable(epoch):
+            raise ValueError('five_clips_unavailable')
+        v.jobs_factory=unavailable
+        with pytest.raises(ValueError,match='five_clips_unavailable'):
+            await v.step()
+        assert not v.state.eligible(chain.epoch) and len(sent)==5
+        assert read_latest(v.root/'scheduler.sqlite3') is None
+        assert await v.step() is None
+        v.close()
+    asyncio.run(run())

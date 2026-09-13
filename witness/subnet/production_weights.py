@@ -62,8 +62,14 @@ def read_latest(path):
     # Read the journal, not a possibly stale JSON projection after a crash.
     db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
     try:
-        row = db.execute('SELECT status,report FROM rounds ORDER BY epoch DESC LIMIT 1').fetchone()
-        return json.loads(row[1]) if row and row[0] == 'complete' else None
+        row = db.execute('''SELECT r.status,r.report,c.epoch FROM rounds r
+            JOIN cursor c ON c.id=1 ORDER BY r.epoch DESC LIMIT 1''').fetchone()
+        if not row or row[0] != 'complete':
+            return None
+        report = json.loads(row[1])
+        # Source preparation can fail before a round has tasks. Its consumed
+        # epoch is still durable; never pay using the preceding comparison.
+        return report if row[2] <= report['finish_epoch'] else None
     finally:
         db.close()
 

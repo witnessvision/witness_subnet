@@ -46,3 +46,18 @@ def test_writer_reads_authoritative_journal_during_an_unfinished_round(tmp_path)
     state.begin(3,[{'original':str(i)} for i in range(5)],[{'uid':1,'hotkey':'h','url':'http://example'}])
     assert read_latest(path) is None
     state.close()
+
+
+def test_failed_preparation_invalidates_the_previous_complete_comparison(tmp_path):
+    path=tmp_path/'scheduler.sqlite3';state=ProductionState(path,{'evaluator':'fixture'})
+    active=state.begin(3,[{'original':str(i)} for i in range(5)],[{'uid':1,'hotkey':'h','url':'http://example'}])
+    for task in state.tasks(active['id']):
+        assert state.claim(task['id'])
+        state.record(task['id'],{'dispatch_attempted':True,'response_valid':True,
+            'evaluation_status':'complete','f1':1.,'reward':.99,'miner_elapsed_s':6.})
+    report=state.finish(active['id'],3)
+    assert read_latest(path)==report
+    state.skip(4)  # No new round row exists when source preparation fails.
+    assert state.latest()==report
+    assert read_latest(path) is None
+    state.close()
