@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import time
 
 from witness.events import content_hash
@@ -74,6 +75,72 @@ def read_latest(path):
         db.close()
 
 
+def activation_gate(activation):
+    """Keep failed acceptance evidence when an operator changes launch policy."""
+    gate = promotion_gate(activation['reports'], activation['calibration'], activation['own_hotkey'])
+    authorization = activation.get('operator_authorization', {})
+    waived = []
+    if (authorization.get('policy') == '70_burn_30_winner'
+            and authorization.get('waive_initial_own_quality') is True
+            and isinstance(authorization.get('reason'), str) and authorization['reason'].strip()
+            and isinstance(authorization.get('authorized_at'), str) and authorization['authorized_at'].strip()
+            and 'own_miner_quality_failure' in gate['failures']):
+        waived = ['own_miner_quality_failure']
+    failures = [f for f in gate['failures'] if f not in waived]
+    if activation.get('operational_probes_passed') is not True:
+        failures.append('operational_probes_not_passed')
+    return {'passed': not failures, 'failures': failures, 'original_gate': gate,
+            'waived_failures': waived}
+
+
+def read_progress(path):
+    db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    try:
+        row = db.execute('''SELECT r.id,r.epoch,r.status,r.report,c.epoch FROM rounds r
+            JOIN cursor c ON c.id=1 ORDER BY r.epoch DESC LIMIT 1''').fetchone()
+        if not row:
+            return {'round_id': None, 'epoch': -1, 'status': 'absent', 'report': None, 'cursor': -1}
+        return dict(zip(('round_id', 'epoch', 'status', 'report', 'cursor'),
+                        (*row[:3], json.loads(row[3]) if row[3] else None, row[4])))
+    finally:
+        db.close()
+
+
+def round_decision(progress, *, burn_uid, epoch, expected_identity, registered_hotkey):
+    # A running round has no result yet. Commit once it closes; do not commit
+    # full burn merely because a polling tick falls during normal evaluation.
+    # A round spanning more than one further epoch is stale and fails to burn.
+    if progress['status'] == 'running' and epoch <= progress['epoch'] + 1:
+        return None
+    report = progress['report']
+    if (progress['status'] != 'complete' or not report
+            or progress['cursor'] > report['finish_epoch']):
+        report = None
+    uids, weights = policy(report, burn_uid=burn_uid, epoch=epoch,
+        expected_identity=expected_identity, registered_hotkey=registered_hotkey)
+    source = {'round_id': progress['round_id'], 'consumed_epoch': progress['cursor'],
+              'uids': uids, 'weights': weights}
+    return {**source, 'decision_id': content_hash(source)}
+
+
+def submission_records(root):
+    records = []
+    for path in sorted((root/'submissions').glob('*.json')):
+        record = json.loads(path.read_text())
+        if record['submission']['status'] in ('prepared', 'unknown'):
+            raise ValueError('ambiguous_submission_requires_reconciliation')
+        records.append(record)
+    return records
+
+
+def pending_is_known(pending, records, block_number):
+    """Only our persisted receipts may coexist with the next round's commit."""
+    known = {block_number(r['submission']['block_hash']) for r in records
+             if r['submission']['status'] in ('included', 'finalized', 'submitted')
+             and r['submission'].get('block_hash')}
+    return all(p['commit_block'] in known for p in pending)
+
+
 def policy(report, *, burn_uid, epoch, expected_identity, registered_hotkey):
     burn = ([burn_uid], [1.])
     if (not report or report.get('complete') is not True or not report.get('winner')
@@ -101,9 +168,8 @@ async def run(chain, config):
     root = Path(config['root'])
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     activation = json.loads(Path(config['activation']).read_text())
-    calibration = activation['calibration']
-    gate = promotion_gate(activation['reports'], calibration, activation['own_hotkey'])
-    if not gate['passed'] or activation.get('operational_probes_passed') is not True:
+    gate = activation_gate(activation)
+    if not gate['passed']:
         raise ValueError('promotion_gates_not_met')
     expected = activation['reports'][0]['identity']
     path = root/'submission.json'
@@ -117,32 +183,56 @@ async def run(chain, config):
         raise ValueError('previous_weight_writer_not_stopped')
     with (root/'writer.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (root/'submissions').mkdir(mode=0o700, exist_ok=True)
+        write_private(root/'activation-gate.json', gate)
         while True:
+            previous = subprocess.run(['systemctl','is-active','witness-burn.service'],
+                                      capture_output=True, text=True, timeout=10)
+            if previous.stdout.strip() not in ('inactive','failed'):
+                raise ValueError('previous_weight_writer_not_stopped')
+            records = submission_records(root)
             state = burn_state(chain, None)
             pending, legacy = pending_commits(chain, state['block_hash'])
             epoch = chain.epoch_state()['epoch_index']
             def registered(uid):
                 return chain.subtensor.substrate.query('SubtensorModule','Keys',[chain.netuid,uid],block_hash=state['block_hash']).value
             try:
-                latest = read_latest(Path(config['scheduler']))
+                progress = read_progress(Path(config['scheduler']))
             except (sqlite3.Error, ValueError, OSError):
-                latest = None
-            uids, weights = policy(latest, burn_uid=state['burn_uid'], epoch=epoch,
-                                   expected_identity=expected, registered_hotkey=registered)
+                progress = {'round_id': None, 'epoch': epoch, 'cursor': epoch,
+                            'status': 'unavailable', 'report': None}
+            decision = round_decision(progress, burn_uid=state['burn_uid'], epoch=epoch,
+                                      expected_identity=expected, registered_hotkey=registered)
+            handover = root/'handover.json'
+            if not handover.exists() and not pending and not legacy:
+                write_private(handover, {'block': state['block'], 'block_hash': state['block_hash'],
+                                        'old_commits_drained': True})
+            reconciled = (handover.exists() and not legacy
+                          and pending_is_known(pending, records, chain.subtensor.substrate.get_block_number))
             observation = {'unix':time.time(),'block':state['block'],'block_hash':state['block_hash'],
-                           'desired':{'uids':uids,'weights':weights},'pending_commits':pending,'legacy_commits':legacy,
+                           'epoch': epoch, 'source_status': progress['status'],
+                           'decision': decision, 'handover_complete': handover.exists(),
+                           'pending_reconciled': reconciled,
+                           'desired': {'uids': decision['uids'], 'weights': decision['weights']} if decision else None,
+                           'pending_commits':pending,'legacy_commits':legacy,
                            'active_weights':chain.subtensor.substrate.query('SubtensorModule','Weights',
                               [chain.netuid,state['validator_uid']],block_hash=state['block_hash']).value}
             write_private(root/'observation.json', observation)
-            # Never stack an uncertain policy behind old encrypted commits.
-            if not state['blocks_until_submission'] and not pending and not legacy:
+            # Each closed round has a durable id. Existing known commits are
+            # expected with timelock reveal; unknown/old commitments block us.
+            already_sent = decision and any(r.get('decision', {}).get('decision_id') == decision['decision_id']
+                                            for r in records)
+            if decision and not already_sent and not state['blocks_until_submission'] and reconciled:
                 record = {**observation,'submission':WeightSubmission('prepared').as_dict()}
+                journal = root/'submissions'/(decision['decision_id']+'.json')
+                write_private(journal, record)
                 write_private(path, record)
                 try:
-                    submission = chain.set_weights(uids, weights)
+                    submission = chain.set_weights(decision['uids'], decision['weights'])
                 except Exception as error:
                     submission = WeightSubmission('unknown', error_type=type(error).__name__)
                 record['submission'] = submission.as_dict()
+                write_private(journal, record)
                 write_private(path, record)
                 if submission.status in ('unknown','prepared'):
                     raise RuntimeError('ambiguous_submission_requires_reconciliation')
@@ -159,6 +249,13 @@ def main():
         if chain.validator_hotkey != config['expected_hotkey'] or chain.subtensor.substrate.get_block_hash(0) != FINNEY_GENESIS:
             raise ValueError('wrong_chain_or_writer')
         asyncio.run(run(chain, config))
+    except (ValueError, RuntimeError) as error:
+        if str(error) in {'wrong_chain_or_writer', 'promotion_gates_not_met',
+                          'previous_weight_writer_not_stopped',
+                          'ambiguous_submission_requires_reconciliation'}:
+            print(json.dumps({'stopped': str(error)}), file=sys.stderr)
+            raise SystemExit(78) from None
+        raise
     finally:
         chain.close()
 

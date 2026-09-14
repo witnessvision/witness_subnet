@@ -1,9 +1,16 @@
 import copy
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
 
 from witness.events import content_hash
 from witness.events_evaluation import PROMPT_HASH
 from witness.subnet.production_state import ProductionState
-from witness.subnet.production_weights import policy, promotion_gate, read_latest
+from witness.subnet.production_weights import (activation_gate, policy, promotion_gate, read_latest,
+    round_decision, pending_is_known, run)
+from witness.subnet.chain import WeightSubmission
 
 
 def evidence():
@@ -61,3 +68,94 @@ def test_failed_preparation_invalidates_the_previous_complete_comparison(tmp_pat
     assert state.latest()==report
     assert read_latest(path) is None
     state.close()
+
+
+def test_operator_quality_waiver_keeps_original_failure_and_other_gates():
+    calibration, reports = evidence()
+    reports[0]['miners'][0]['mean_f1'] = .5
+    activation = {'calibration': calibration, 'reports': reports, 'own_hotkey': 'candidate',
+                  'operational_probes_passed': True}
+    assert not activation_gate(activation)['passed']
+    activation['operator_authorization'] = {'policy': '70_burn_30_winner',
+        'waive_initial_own_quality': True, 'authorized_at': '2026-01-01T00:00:00Z',
+        'reason': 'Operator explicitly requested production weights after reviewing acceptance.'}
+    gate = activation_gate(activation)
+    assert gate['passed'] and not gate['original_gate']['passed']
+    assert gate['waived_failures'] == ['own_miner_quality_failure']
+    for field, value in [('valid', 4), ('scored', 4), ('sent', 4)]:
+        changed = copy.deepcopy(activation)
+        changed['reports'][0]['miners'][0][field] = value
+        assert not activation_gate(changed)['passed']
+    changed = copy.deepcopy(activation); changed['calibration']['accuracy'] = .9
+    assert not activation_gate(changed)['passed']
+    changed = copy.deepcopy(activation); changed['operational_probes_passed'] = False
+    assert not activation_gate(changed)['passed']
+
+
+def test_closed_round_decision_is_stable_and_fails_closed():
+    _, reports = evidence(); report = reports[-1]
+    progress = {'round_id': '2', 'epoch': 2, 'cursor': 2, 'status': 'complete', 'report': report}
+    args = {'burn_uid': 240, 'epoch': 2, 'expected_identity': report['identity'],
+            'registered_hotkey': lambda uid: 'candidate'}
+    decision = round_decision(progress, **args)
+    assert decision['weights'] == [.7, .3]
+    assert decision == round_decision(progress, **{**args, 'epoch': 3})
+    assert round_decision({**progress, 'status': 'running', 'report': None}, **args) is None
+    assert round_decision({**progress, 'status': 'running', 'report': None},
+                         **{**args, 'epoch': 4})['weights'] == [1.]
+    for changed in ({**progress, 'status': 'incomplete'}, {**progress, 'cursor': 3}):
+        fallback = round_decision(changed, **args)
+        assert fallback['weights'] == [1.] and fallback['decision_id'] != decision['decision_id']
+    assert round_decision(progress, **{**args, 'registered_hotkey': lambda uid: 'replacement'})['weights'] == [1.]
+
+
+def test_unknown_pending_commit_blocks_new_round():
+    receipt = {'submission': WeightSubmission('finalized', block_hash='block-a').as_dict()}
+    assert pending_is_known([{'commit_block': 10}], [receipt], lambda h: 10)
+    assert not pending_is_known([{'commit_block': 11}], [receipt], lambda h: 10)
+    assert not pending_is_known([{'commit_block': 10}], [], lambda h: 10)
+
+
+def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monkeypatch):
+    import witness.subnet.production_weights as module
+    calibration, reports = evidence()
+    activation = {'calibration': calibration, 'reports': reports, 'own_hotkey': 'candidate',
+                  'operational_probes_passed': True}
+    activation_path = tmp_path/'activation.json'; activation_path.write_text(json.dumps(activation))
+    config = {'root': str(tmp_path), 'activation': str(activation_path), 'scheduler': 'unused'}
+    progress = {'round_id': '2', 'epoch': 2, 'cursor': 2, 'status': 'complete', 'report': reports[-1]}
+    pending = [{'commit_block': 8}]
+    submitted = []
+    substrate = SimpleNamespace(get_block_number=lambda h: 10,
+        query=lambda module, name, *a, **k: SimpleNamespace(value='candidate' if name == 'Keys' else []))
+    def send(uids, weights):
+        submitted.append((uids, weights))
+        return WeightSubmission('finalized', block_hash='block-a')
+    chain = SimpleNamespace(netuid=20, subtensor=SimpleNamespace(substrate=substrate),
+        epoch_state=lambda: {'epoch_index': 2}, set_weights=send)
+    monkeypatch.setattr(module, 'burn_state', lambda *a: {'block': 10, 'block_hash': 'block-a',
+        'burn_uid': 240, 'validator_uid': 240, 'blocks_until_submission': 0})
+    monkeypatch.setattr(module, 'pending_commits', lambda *a: (pending, None))
+    monkeypatch.setattr(module, 'read_progress', lambda *a: progress)
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='inactive'))
+    class StopLoop(Exception): pass
+    async def stop(*a): raise StopLoop
+    monkeypatch.setattr(module.asyncio, 'sleep', stop)
+    def tick():
+        with pytest.raises(StopLoop): asyncio.run(run(chain, config))
+    tick()
+    assert not submitted and not (tmp_path/'handover.json').exists()
+    pending.clear(); tick()
+    assert submitted == [([240, 117], [.7, .3])]
+    tick()  # A service restart does not repeat a finalized decision.
+    assert len(submitted) == 1
+    pending.append({'commit_block': 10})
+    progress.update(round_id='3', epoch=3, cursor=3, status='incomplete', report=None)
+    tick()  # The next incomplete round requests burn despite our known pending commit.
+    assert submitted[-1] == ([240], [1.]) and len(submitted) == 2
+    record = next((tmp_path/'submissions').glob('*.json'))
+    value = json.loads(record.read_text()); value['submission']['status'] = 'unknown'
+    record.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='ambiguous_submission'):
+        asyncio.run(run(chain, config))
+    assert len(submitted) == 2

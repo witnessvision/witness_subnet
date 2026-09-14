@@ -101,9 +101,22 @@ requires 300 calibration cases with accuracy at least 95% and contradiction
 acceptance at most 2%, plus 15/15 valid on-time responses for the deployment
 candidate, mean F1 at least 0.98 and mean score at least 0.96.
 
+An explicit operator instruction may waive only that initial candidate quality
+threshold. Record `operator_authorization` with `policy: 70_burn_30_winner`,
+`waive_initial_own_quality: true`, `authorized_at` and a nonempty `reason` in the
+private activation artifact. Preserve the original reports and failed gate.
+Calibration, complete comparisons, dispatch counts, valid on-time responses and
+operational probes cannot be waived by this option. It does not give the candidate
+priority: the complete-round hotkey EMA still selects the winner.
+
 Stop the superseded writer and reconcile its pending commitments before activation.
 The new writer holds an exclusive lock, rechecks subnet-owner burn destination
-and validator permit, and never stacks a policy behind an unresolved commitment.
+and validator permit, and never stacks a policy behind an unknown commitment.
+After old commitments drain, each closed round produces one durable submission
+record. Known pending commitments from those receipts can coexist with the next
+round's commit. Restarts never resend a recorded decision. A running round waits
+for its result; a stalled round, failed preparation or incomplete comparison
+requests full burn. Registration changes also invalidate an earlier winner.
 Without a complete current comparison and valid winner it requests full burn.
 An ambiguous submission stops for reconciliation. A submitted/finalized commit
 does not prove active weights: verify reveal events, actual weights and pending
