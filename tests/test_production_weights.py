@@ -151,11 +151,22 @@ def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monk
     assert len(submitted) == 1
     pending.append({'commit_block': 10})
     progress.update(round_id='3', epoch=3, cursor=3, status='incomplete', report=None)
-    tick()  # The next incomplete round requests burn despite our known pending commit.
+    tick()  # Even a known pending commitment blocks a different policy.
+    assert len(submitted) == 1
+    pending.clear(); tick()
     assert submitted[-1] == ([240], [1.]) and len(submitted) == 2
+    pending.append({'commit_block': 10})
+    next_report = {**reports[-1], 'round_id': '4', 'epoch': 4, 'finish_epoch': 4}
+    progress.update(round_id='4', epoch=4, cursor=4, status='complete', report=next_report)
+    tick()  # An older burn must not be able to reveal after a newer winner.
+    assert len(submitted) == 2
+    pending.clear(); tick()
+    assert submitted[-1] == ([240, 117], [.7, .3]) and len(submitted) == 3
+    tick()
+    assert len(submitted) == 3
     record = next((tmp_path/'submissions').glob('*.json'))
     value = json.loads(record.read_text()); value['submission']['status'] = 'unknown'
     record.write_text(json.dumps(value))
     with pytest.raises(ValueError, match='ambiguous_submission'):
         asyncio.run(run(chain, config))
-    assert len(submitted) == 2
+    assert len(submitted) == 3

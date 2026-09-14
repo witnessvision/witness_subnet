@@ -218,11 +218,13 @@ async def run(chain, config):
                            'active_weights':chain.subtensor.substrate.query('SubtensorModule','Weights',
                               [chain.netuid,state['validator_uid']],block_hash=state['block_hash']).value}
             write_private(root/'observation.json', observation)
-            # Each closed round has a durable id. Existing known commits are
-            # expected with timelock reveal; unknown/old commitments block us.
+            # Timelock commitments may reveal out of submission order, even
+            # within the same epoch. Drain every commitment before sending the
+            # next policy so an older burn cannot overwrite a newer winner.
             already_sent = decision and any(r.get('decision', {}).get('decision_id') == decision['decision_id']
                                             for r in records)
-            if decision and not already_sent and not state['blocks_until_submission'] and reconciled:
+            if (decision and not already_sent and not pending and not legacy
+                    and not state['blocks_until_submission'] and reconciled):
                 record = {**observation,'submission':WeightSubmission('prepared').as_dict()}
                 journal = root/'submissions'/(decision['decision_id']+'.json')
                 write_private(journal, record)

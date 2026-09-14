@@ -113,8 +113,9 @@ Stop the superseded writer and reconcile its pending commitments before activati
 The new writer holds an exclusive lock, rechecks subnet-owner burn destination
 and validator permit, and never stacks a policy behind an unknown commitment.
 After old commitments drain, each closed round produces one durable submission
-record. Known pending commitments from those receipts can coexist with the next
-round's commit. Restarts never resend a recorded decision. A running round waits
+record. All pending commitments must drain before the next policy is submitted:
+timelock reveals can arrive out of submission order, including within one epoch.
+Restarts never resend a recorded decision. A running round waits
 for its result; a stalled round, failed preparation or incomplete comparison
 requests full burn. Registration changes also invalidate an earlier winner.
 Without a complete current comparison and valid winner it requests full burn.
