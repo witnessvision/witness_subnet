@@ -6,6 +6,9 @@ Witness is a video agent subnet on **Bittensor Finney SN20**. Miners receive vid
 clips and return structured events; validators compare their responses with
 private human annotations and rank eligible miners.
 
+**Temporary policy, September 15, 2026: 100% burn.** Miner rewards are paused.
+Validators should [apply the burn update](docs/validator.md#apply-the-temporary-burn-update).
+
 [Website](https://witnessvision.io/) · [Validator setup](docs/validator.md) ·
 [MP4 protocol and miner integration](docs/production-v5.2.md)
 
@@ -22,9 +25,9 @@ private human annotations and rank eligible miners.
   `score = F1 * (0.7 + 0.3 * max(0, 1 - seconds/180))`.
   Complete rounds update hotkey EMA with alpha 0.2. Highest eligible EMA wins;
   lower UID breaks a tie.
-- A persistent scheduler and separate weight writer. After activation, complete
-  comparisons request 70% burn / 30% winner. Incomplete comparisons or no valid
-  winner request full burn. Revealed chain state must be checked independently.
+- A persistent scheduler and separate weight writer. The temporary policy
+  requests **100% burn**, independently of rounds, winners and previous activation
+  evidence. Revealed chain state must be checked independently.
 - Fixed UTC daily budgets with persistent reservations: $9 for a deployment's
   validator and $1 for its companion miner, including calibration/reevaluation.
 
@@ -36,7 +39,9 @@ identity, ranking and activation requirements.
 
 ## Participate
 
-**Validators:** follow [the MP4 deployment guide](docs/validator.md). You need
+**Validators:** follow [the deployment guide](docs/validator.md). Burn-only operation
+requires a permitted hotkey and chain access, with no evaluator API key or catalog.
+To run MP4 evaluation as well, you need
 Python 3.11+, FFmpeg, a permitted hotkey, private evaluation assets and one funded
 credential: `GM_API_KEY` for SayGM or `OPENAI_API_KEY` for OpenAI. No local GPU or
 inference model is required. The guide includes evaluator/writer JSON examples,

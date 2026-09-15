@@ -1,4 +1,4 @@
-"""Guarded single writer: 70% burn/30% winner only with complete evidence."""
+"""Temporary full-burn policy; one persistent writer, no miner allocation."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +17,8 @@ from witness.storage import write_private
 from witness.subnet.burn import burn_state
 from witness.subnet.chain import BittensorChainAdapter, WeightSubmission
 from witness.subnet.mainnet import FINNEY_GENESIS
+
+WEIGHT_POLICY = 'full-burn-2026-09-15'
 
 
 def promotion_gate(reports, calibration, own_hotkey):
@@ -108,18 +110,12 @@ def read_progress(path):
 
 
 def round_decision(progress, *, burn_uid, epoch, expected_identity, registered_hotkey):
-    # A running round has no result yet. Commit once it closes; do not commit
-    # full burn merely because a polling tick falls during normal evaluation.
-    # A round spanning more than one further epoch is stale and fails to burn.
-    if progress['status'] == 'running' and epoch <= progress['epoch'] + 1:
-        return None
-    report = progress['report']
-    if (progress['status'] != 'complete' or not report
-            or progress['cursor'] > report['finish_epoch']):
-        report = None
-    uids, weights = policy(report, burn_uid=burn_uid, epoch=epoch,
+    # The pause is independent of evaluator state or old activation evidence.
+    # Refresh once per epoch, including while a round is running or unavailable.
+    # A policy-specific ID cannot collide with an earlier winner submission.
+    uids, weights = policy(None, burn_uid=burn_uid, epoch=epoch,
         expected_identity=expected_identity, registered_hotkey=registered_hotkey)
-    source = {'round_id': progress['round_id'], 'consumed_epoch': progress['cursor'],
+    source = {'round_id': None, 'consumed_epoch': epoch, 'policy': WEIGHT_POLICY,
               'uids': uids, 'weights': weights}
     return {**source, 'decision_id': content_hash(source)}
 
@@ -143,15 +139,9 @@ def pending_is_known(pending, records, block_number):
 
 
 def policy(report, *, burn_uid, epoch, expected_identity, registered_hotkey):
-    burn = ([burn_uid], [1.])
-    if (not report or report.get('complete') is not True or not report.get('winner')
-            or report.get('identity') != expected_identity or epoch > report['finish_epoch']+1):
-        return burn
-    winner = report['winner']
-    if (not winner.get('eligible') or winner['mean_score'] <= 0 or winner['uid'] == burn_uid
-            or registered_hotkey(winner['uid']) != winner['hotkey']):
-        return burn
-    return [burn_uid, winner['uid']], [.7, .3]
+    # No config flag, winner, calibration or historical waiver can enable 70/30.
+    # Keep this call signature for existing public callers and saved diagnostics.
+    return [burn_uid], [1.]
 
 
 def pending_commits(chain, block_hash):
@@ -168,11 +158,6 @@ def pending_commits(chain, block_hash):
 async def run(chain, config):
     root = Path(config['root'])
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    activation = json.loads(Path(config['activation']).read_text())
-    gate = activation_gate(activation)
-    if not gate['passed']:
-        raise ValueError('promotion_gates_not_met')
-    expected = activation['reports'][0]['identity']
     path = root/'submission.json'
     if path.exists() and json.loads(path.read_text()).get('submission',{}).get('status') in ('prepared','unknown'):
         raise ValueError('ambiguous_submission_requires_reconciliation')
@@ -185,7 +170,8 @@ async def run(chain, config):
     with (root/'writer.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         (root/'submissions').mkdir(mode=0o700, exist_ok=True)
-        write_private(root/'activation-gate.json', gate)
+        # Preserve the historical activation-gate artifact for audit.
+        write_private(root/'weight-policy.json', {'policy': WEIGHT_POLICY, 'burn_rate': 1.0})
         while True:
             previous = subprocess.run(['systemctl','is-active','witness-burn.service'],
                                       capture_output=True, text=True, timeout=10)
@@ -195,15 +181,8 @@ async def run(chain, config):
             state = burn_state(chain, None)
             pending, legacy = pending_commits(chain, state['block_hash'])
             epoch = chain.epoch_state()['epoch_index']
-            def registered(uid):
-                return chain.subtensor.substrate.query('SubtensorModule','Keys',[chain.netuid,uid],block_hash=state['block_hash']).value
-            try:
-                progress = read_progress(Path(config['scheduler']))
-            except (sqlite3.Error, ValueError, OSError):
-                progress = {'round_id': None, 'epoch': epoch, 'cursor': epoch,
-                            'status': 'unavailable', 'report': None}
-            decision = round_decision(progress, burn_uid=state['burn_uid'], epoch=epoch,
-                                      expected_identity=expected, registered_hotkey=registered)
+            decision = round_decision(None, burn_uid=state['burn_uid'], epoch=epoch,
+                                      expected_identity=None, registered_hotkey=None)
             handover = root/'handover.json'
             if not handover.exists() and not pending and not legacy:
                 write_private(handover, {'block': state['block'], 'block_hash': state['block_hash'],
@@ -211,7 +190,7 @@ async def run(chain, config):
             reconciled = (handover.exists() and not legacy
                           and pending_is_known(pending, records, chain.subtensor.substrate.get_block_number))
             observation = {'unix':time.time(),'block':state['block'],'block_hash':state['block_hash'],
-                           'epoch': epoch, 'source_status': progress['status'],
+                           'epoch': epoch, 'source_status': 'full_burn_pause', 'policy': WEIGHT_POLICY,
                            'decision': decision, 'handover_complete': handover.exists(),
                            'pending_reconciled': reconciled,
                            'desired': {'uids': decision['uids'], 'weights': decision['weights']} if decision else None,

@@ -54,10 +54,10 @@ def test_field_judge_promotion_requires_matching_new_calibration_and_prompt():
     assert not promotion_gate(reports, calibration, 'candidate')['passed']
 
 
-def test_policy_returns_to_burn_when_incomplete_stale_or_uid_reused():
+def test_pause_always_burns_even_with_a_qualified_winner():
     _,reports=evidence();report=reports[-1]
     args={'burn_uid':240,'epoch':2,'expected_identity':report['identity'],'registered_hotkey':lambda uid:'candidate'}
-    assert policy(report,**args)==([240,117],[.7,.3])
+    assert policy(report,**args)==([240],[1.])
     for changed in (None,{**report,'complete':False},{**report,'winner':None}):
         assert policy(changed,**args)==([240],[1.])
     assert policy(report,**{**args,'epoch':4})==([240],[1.])
@@ -108,20 +108,21 @@ def test_operator_quality_waiver_keeps_original_failure_and_other_gates():
     assert not activation_gate(changed)['passed']
 
 
-def test_closed_round_decision_is_stable_and_fails_closed():
+def test_burn_decision_is_stable_per_epoch_and_never_waits_for_evaluation():
     _, reports = evidence(); report = reports[-1]
     progress = {'round_id': '2', 'epoch': 2, 'cursor': 2, 'status': 'complete', 'report': report}
     args = {'burn_uid': 240, 'epoch': 2, 'expected_identity': report['identity'],
             'registered_hotkey': lambda uid: 'candidate'}
     decision = round_decision(progress, **args)
-    assert decision['weights'] == [.7, .3]
-    assert decision == round_decision(progress, **{**args, 'epoch': 3})
-    assert round_decision({**progress, 'status': 'running', 'report': None}, **args) is None
+    assert decision['weights'] == [1.]
+    assert decision == round_decision(progress, **args)
+    assert decision['decision_id'] != round_decision(progress, **{**args, 'epoch': 3})['decision_id']
+    assert round_decision({**progress, 'status': 'running', 'report': None}, **args) == decision
     assert round_decision({**progress, 'status': 'running', 'report': None},
                          **{**args, 'epoch': 4})['weights'] == [1.]
     for changed in ({**progress, 'status': 'incomplete'}, {**progress, 'cursor': 3}):
         fallback = round_decision(changed, **args)
-        assert fallback['weights'] == [1.] and fallback['decision_id'] != decision['decision_id']
+        assert fallback == decision
     assert round_decision(progress, **{**args, 'registered_hotkey': lambda uid: 'replacement'})['weights'] == [1.]
 
 
@@ -148,7 +149,7 @@ def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monk
         submitted.append((uids, weights))
         return WeightSubmission('finalized', block_hash='block-a')
     chain = SimpleNamespace(netuid=20, subtensor=SimpleNamespace(substrate=substrate),
-        epoch_state=lambda: {'epoch_index': 2}, set_weights=send)
+        epoch_state=lambda: {'epoch_index': progress['epoch']}, set_weights=send)
     monkeypatch.setattr(module, 'burn_state', lambda *a: {'block': 10, 'block_hash': 'block-a',
         'burn_uid': 240, 'validator_uid': 240, 'blocks_until_submission': 0})
     monkeypatch.setattr(module, 'pending_commits', lambda *a: (pending, None))
@@ -162,7 +163,7 @@ def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monk
     tick()
     assert not submitted and not (tmp_path/'handover.json').exists()
     pending.clear(); tick()
-    assert submitted == [([240, 117], [.7, .3])]
+    assert submitted == [([240], [1.])]
     tick()  # A service restart does not repeat a finalized decision.
     assert len(submitted) == 1
     pending.append({'commit_block': 10})
@@ -174,10 +175,10 @@ def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monk
     pending.append({'commit_block': 10})
     next_report = {**reports[-1], 'round_id': '4', 'epoch': 4, 'finish_epoch': 4}
     progress.update(round_id='4', epoch=4, cursor=4, status='complete', report=next_report)
-    tick()  # An older burn must not be able to reveal after a newer winner.
+    tick()  # Drain the earlier epoch's commitment before refreshing burn.
     assert len(submitted) == 2
     pending.clear(); tick()
-    assert submitted[-1] == ([240, 117], [.7, .3]) and len(submitted) == 3
+    assert submitted[-1] == ([240], [1.]) and len(submitted) == 3
     tick()
     assert len(submitted) == 3
     record = next((tmp_path/'submissions').glob('*.json'))
@@ -186,3 +187,38 @@ def test_writer_handover_round_journal_restart_and_ambiguous_stop(tmp_path, monk
     with pytest.raises(ValueError, match='ambiguous_submission'):
         asyncio.run(run(chain, config))
     assert len(submitted) == 3
+
+
+def test_burn_needs_no_activation_catalog_scheduler_or_provider(tmp_path, monkeypatch):
+    import witness.subnet.production_weights as module
+    old_gate = tmp_path/'activation-gate.json'
+    old_gate.write_text('{"historical": true}')
+    # An old malformed activation path must not prevent emergency burn.
+    config = {'root': str(tmp_path), 'activation': '/missing/activation.json',
+              'scheduler': '/missing/scheduler.sqlite3'}
+    submitted = []
+    def send(uids, weights):
+        submitted.append((uids, weights))
+        return WeightSubmission('finalized', block_hash='block-a')
+    chain = SimpleNamespace(netuid=20, set_weights=send, epoch_state=lambda: {'epoch_index': 10},
+        subtensor=SimpleNamespace(substrate=SimpleNamespace(get_block_number=lambda h: 100,
+            query=lambda *a, **k: SimpleNamespace(value=[[240, 65535], [7, 28086]]))))
+    state = {'block': 100, 'block_hash': 'block-a', 'burn_uid': 240, 'validator_uid': 3,
+             'blocks_until_submission': 1}
+    monkeypatch.setattr(module, 'burn_state', lambda *a: state)
+    monkeypatch.setattr(module, 'pending_commits', lambda *a: ([], None))
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='inactive'))
+    class StopLoop(Exception): pass
+    async def stop(*a): raise StopLoop
+    monkeypatch.setattr(module.asyncio, 'sleep', stop)
+    with pytest.raises(StopLoop): asyncio.run(run(chain, config))
+    assert not submitted
+    state['blocks_until_submission'] = 0
+    with pytest.raises(StopLoop): asyncio.run(run(chain, config))
+    assert submitted == [([240], [1.])]
+    assert json.loads(old_gate.read_text()) == {'historical': True}
+    assert json.loads((tmp_path/'observation.json').read_text())['desired'] == {'uids': [240], 'weights': [1.]}
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='active'))
+    with pytest.raises(ValueError, match='previous_weight_writer_not_stopped'):
+        asyncio.run(run(chain, config))
+    assert len(submitted) == 1

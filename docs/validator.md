@@ -3,8 +3,8 @@
 Witness production uses **signed MP4 transport 5.2 on Finney SN20**. It sends five
 shared clips per round to every registered endpoint advertising an IP and port.
 A remote evaluator compares miner events with private human annotations. A
-separate writer requests **70% burn / 30% to the eligible EMA winner** after
-activation; incomplete comparisons request **100% burn**.
+separate writer now enforces **100% burn for every round**. Miner reward allocation
+is temporarily paused while the benchmark is reviewed. Rankings remain diagnostic.
 
 The validator needs CPU, FFmpeg and **one funded API credential**. No local GPU
 or inference model is required. The legacy `witness-validator --mainnet` command
@@ -174,26 +174,23 @@ incomplete and prevent EMA updates. Saved signed responses and semantic decision
 support offline reproduction without resending. See the
 [wire, scoring and ranking contract](production-v5.2.md).
 
-## 5. Activate one weight writer
+## 5. Run one full-burn weight writer
 
-Keep 100% burn until calibration, three consecutive complete rounds and operational
-acceptance pass. The [activation contract](production-v5.2.md#weight-handover) defines
-the 15-response quality/latency gate, cancellation/restart probes and the narrowly
-scoped operator exception. Do not mark unperformed checks passed.
+As of the September 15, 2026 update, the production writer unconditionally sends
+100% to the registered subnet-owner burn destination. A winning miner, a completed
+round or an old activation/waiver file cannot restore 70/30. Resuming miner rewards
+requires a later reviewed code release; there is no automatic expiry or config
+switch. Evaluation can continue independently.
 
-Prepare a private activation JSON containing `reports` (three complete reports),
-`calibration` (the matching report), `own_hotkey` (the deployment candidate's hotkey)
-and `operational_probes_passed` backed by saved evidence. Validators do not need to
-run a competitive miner themselves, but this writer still requires a qualified
-candidate in the activation evidence. That candidate receives no priority in ranking.
+Burn-only operation needs a permitted hotkey and Finney access. It does not need
+an API key, video catalog, calibration, scheduler or competitive miner. The
+provider and data requirements above apply only when running evaluation.
 
 Save this separate writer config as `/var/lib/witness-validator/weights.json`:
 
 ```json
 {
   "root": "/var/lib/witness-validator/v5.2/weights",
-  "activation": "/var/lib/witness-validator/v5.2/activation.json",
-  "scheduler": "/var/lib/witness-validator/v5.2/rounds/scheduler.sqlite3",
   "network": "finney",
   "wallet": "MY_WALLET",
   "wallet_hotkey": "MY_HOTKEY_NAME",
@@ -202,8 +199,10 @@ Save this separate writer config as `/var/lib/witness-validator/weights.json`:
 }
 ```
 
-Stop the superseded writer and disable its restart/timer. Reconcile its pending
-commitments, then start the replacement with secure wallet access:
+Stop the superseded writer and disable its restart/timer. **Reuse its existing
+writer root**, including `submissions/`, `submission.json`, `handover.json` and the
+lock. The example root is for a new deployment, not permission to reset receipts.
+Reconcile pending commitments, then start the replacement with secure wallet access:
 
 ```bash
 .venv/bin/python -m witness.subnet.production_weights \
@@ -216,32 +215,55 @@ also stop any writer with a different service name. The exclusive lock protects
 only processes sharing the same writer root. Configure the supervisor not to
 restart exit code 78, which requires operator reconciliation.
 
-A complete round with an eligible winner requests 70% burn / 30% winner. A running
-round waits normally; incomplete, unavailable or stale comparisons request full
-burn. Hotkey EMA uses alpha 0.2, with lower UID breaking a tie. The writer rechecks
-registration and the owned burn destination.
+The writer verifies the registered subnet-owner burn destination, `RecycleOrBurn`
+and validator permit at a finalized block. It creates one durable full-burn
+decision per epoch, even while evaluation is running, absent or incomplete.
 
 Decisions and receipts persist under `weights/submissions/`; restarts do not
-resubmit them. All pending commitments must drain before the next submission:
-timelock reveals can arrive out of order. A closed round therefore does not
-guarantee a newly active vector in the same epoch. Inspect
-`weights/observation.json` for source status, desired vector and pending commits.
-An ambiguous submission stops; preserve its receipt and reconcile chain state
-before restarting. Do not delete the journal to bypass the guard.
+resubmit the same decision. Old pending commitments must drain before a new
+submission, because timelock reveals can arrive out of order. A pending 70/30
+commit cannot be cancelled by changing code; it may reveal before the replacement
+burn vector. Respect chain rate limits and verify the final active state.
+
+Inspect `weights/weight-policy.json` and `weights/observation.json` for policy,
+desired vector, active weights and pending commitments. An ambiguous submission
+stops; preserve its receipt and reconcile chain state before restarting. Do not
+delete the journal to bypass the guard.
 
 ## 6. Verify active weights and consensus
 
 At one **finalized block**, check the validator hotkey/UID/permit, owned burn
 destination and `RecycleOrBurn`, actual `Weights`, native reveal events and pending
 timelocked/legacy commitments. A finalized commitment is not proof of active
-weights. Normalize integer weights by their row sum; the chain need not store
-literal 70 and 30.
+weights. The expected full-burn row is exactly `[[burn_uid, 65535]]`, with no
+other positive destination. Resolve the burn UID from current chain state rather
+than assuming an old UID remains registered.
 
 Then inspect `Consensus`/`Incentive` for miners and `ValidatorTrust`/`Dividends`
 for your validator, alongside other permitted validators' weights. These metrics
 come from the latest mechanism step; newly revealed weights can be newer than
-that step. Your 70/30 vote does not guarantee a 70/30 subnet payout. Yuma combines
+that step. One validator burning 100% does not force every validator to burn.
+Others must adopt this update, and older/custom code can retain different votes.
+Yuma combines
 stake-weighted validator opinions; see [Bittensor's consensus documentation](https://www.bittensor.com/docs/internals/consensus).
+
+## Apply the temporary burn update
+
+Use your established service supervisor to stop the current weight writer first.
+Fetch and review `origin/main`, fast-forward your deployment checkout and reinstall
+the public package in its own environment. Do not overwrite local work:
+
+```bash
+git fetch origin
+git merge --ff-only origin/main
+.venv/bin/python -m pip install .
+.venv/bin/python -c 'from witness.subnet.production_weights import WEIGHT_POLICY; print(WEIGHT_POLICY)'
+```
+
+Require `full-burn-2026-09-15`, restart the single writer using its preserved root,
+and follow the chain checks above. Custom/old installations will not update
+automatically. This update does not change the evaluator identity or require new
+calibration; an existing evaluation process can keep running.
 
 ## Upgrade without losing evidence
 

@@ -111,37 +111,34 @@ and the [SayGM model catalogue](https://api.saygm.com/v1/models).
 
 ## Weight handover
 
-The evaluator cannot write weights. Existing full burn remains active during
-validation. `witness.subnet.production_weights` is the separate replacement writer.
-It requires a private activation artifact with the Luna calibration, three
-consecutive complete round reports and the completed operational probes. Promotion
-requires 300 calibration cases with accuracy at least 95% and contradiction
-acceptance at most 2%, plus 15/15 valid on-time responses for the deployment
-candidate, mean F1 at least 0.98 and mean score at least 0.96.
+The evaluator cannot write weights. Since September 15, 2026, the separate
+`witness.subnet.production_weights` writer enforces **100% burn** irrespective of
+miner performance, evaluator availability and old activation evidence. The
+production pause has no automatic expiry and no configuration override. A later
+reviewed release is required to resume miner rewards.
 
-An explicit operator instruction may waive only that initial candidate quality
-threshold. Record `operator_authorization` with `policy: 70_burn_30_winner`,
-`waive_initial_own_quality: true`, `authorized_at` and a nonempty `reason` in the
-private activation artifact. Preserve the original reports and failed gate.
-Calibration, complete comparisons, dispatch counts, valid on-time responses and
-operational probes cannot be waived by this option. It does not give the candidate
-priority: the complete-round hotkey EMA still selects the winner.
+Burn operation requires no calibration, catalog, scheduler or provider key. The
+old `activation` and `scheduler` config entries are accepted but are not read by
+the writer. Existing promotion helpers remain available for historical evidence
+inspection; their result does not authorize miner allocation during this pause.
+Preserve the old activation artifacts, scores and ranking series.
 
-Stop the superseded writer and reconcile its pending commitments before activation.
-The new writer holds an exclusive lock, rechecks subnet-owner burn destination
-and validator permit, and never stacks a policy behind an unknown commitment.
-After old commitments drain, each closed round produces one durable submission
-record. All pending commitments must drain before the next policy is submitted:
-timelock reveals can arrive out of submission order, including within one epoch.
-Restarts never resend a recorded decision. A running round waits
-for its result; a stalled round, failed preparation or incomplete comparison
-requests full burn. Registration changes also invalidate an earlier winner.
-Without a complete current comparison and valid winner it requests full burn.
-An ambiguous submission stops for reconciliation. A submitted/finalized commit
-does not prove active weights: verify reveal events, actual weights and pending
-commit state before reporting activation. Operational regression requires rollback
-and reconciliation before returning to the previous full-burn service.
+Stop the superseded writer and retain its submission journal/root. The new writer
+holds the existing exclusive lock, rechecks the subnet-owner burn destination,
+`RecycleOrBurn` and validator permit, and waits for all prior timelocked and legacy
+commitments to drain. An already committed 70/30 vector can still reveal during
+handover; changing software does not cancel it. Respect the chain submission rate
+limit and verify the subsequent burn reveal.
 
-Calibration reports must include provenance and uncertainty intervals. Shared
-templates/originals are dependent observations. Accuracy on indexed content
-measures benchmark concordance; it does not establish general video understanding.
+One durable burn decision is produced per epoch, including while evaluation is
+running, unavailable or incomplete. Policy-specific decision IDs prevent old
+winner receipts from suppressing the burn update; restarts do not duplicate a
+recorded decision. Ambiguous submissions stop for reconciliation. Preserve all
+receipts, including the previous activation gate. The current policy is stored in
+`weight-policy.json`; desired and observed vectors are in `observation.json`.
+
+A submitted/finalized commitment does not prove active weights. At a finalized
+block verify reveal events, the exact row `[[burn_uid, 65535]]` and pending commit
+state. Other validators must update independently; one published release or one
+validator's burn does not establish subnet-wide adoption. See the
+[validator update guide](validator.md#apply-the-temporary-burn-update).
