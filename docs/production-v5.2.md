@@ -79,6 +79,21 @@ effort, output limit, adapter, prompt and calibration identify the ranking serie
 Changing the evaluator requires new calibration and a new ranking state directory.
 Cache identities include provider and the complete request configuration.
 
+The production judge uses `fields-only-v2`: the model returns exactly one relation
+for every supplied event field, and the validator derives the overall relation
+with precedence `contradiction > uncertain > unbacked > supported`. It does not
+ask the model for a redundant global relation. Missing, extra or invalid field
+decisions still leave evaluation incomplete. Raw provider outputs stay in the
+request cache; scorer decisions retain every field unchanged. The strict v1
+`ApiJudge` and its prompt remain available for historical experiments.
+
+Upgrading from `all-fields-v1` requires new calibration, a separate judge cache and
+a fresh ranking root. Keep prior responses and reports unchanged. An explicit
+reevaluation may rebuild the new series from complete sets of saved responses,
+using their original request identities and measured latencies; recompute every
+valid response and start EMA from zero. Never copy old scores/EMA or relabel an old
+calibration. API/budget failures during reevaluation remain incomplete.
+
 The fixed allocations are $9/day UTC for the validator and $1/day UTC for the
 miner. Each role has exactly one authoritative ledger on its host, outside
 release, provider and cache directories. Calibration and saved-response

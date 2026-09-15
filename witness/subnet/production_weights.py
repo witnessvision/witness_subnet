@@ -12,7 +12,7 @@ import sys
 import time
 
 from witness.events import content_hash
-from witness.events_evaluation import PROMPT_HASH
+from witness.events_evaluation import PROMPT_HASH, FIELD_PROMPT_HASH
 from witness.storage import write_private
 from witness.subnet.burn import burn_state
 from witness.subnet.chain import BittensorChainAdapter, WeightSubmission
@@ -25,7 +25,7 @@ def promotion_gate(reports, calibration, own_hotkey):
             or calibration.get('accuracy', 0) < .95
             or calibration.get('contradiction_acceptance') is None
             or calibration['contradiction_acceptance'] > .02
-            or calibration.get('prompt_hash') != PROMPT_HASH):
+            or calibration.get('prompt_hash') not in (PROMPT_HASH, FIELD_PROMPT_HASH)):
         failures.append('luna_calibration_not_passed')
     if len(reports) != 3 or len({r['round_id'] for r in reports}) != 3:
         failures.append('three_distinct_rounds_required')
@@ -36,6 +36,7 @@ def promotion_gate(reports, calibration, own_hotkey):
         evaluator = report['identity']['evaluator']
         if (evaluator.get('judge_model') != 'gpt-5.6-luna' or evaluator.get('judge_effort') != 'low'
                 or evaluator.get('evaluator_id') != calibration.get('evaluator_id')
+                or evaluator.get('prompt_hash') != calibration.get('prompt_hash')
                 or report['identity'].get('calibration_hash') != content_hash(calibration)):
             failures.append('evaluator_identity_mismatch')
         if not report.get('complete'):

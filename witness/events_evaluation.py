@@ -26,24 +26,38 @@ supported. No prose, no extra keys. Timestamps are evaluated separately.
 """
 PROMPT_HASH = content_hash(JUDGE_PROMPT)
 
+# Keep the experimental v1 prompt for reproducible historical evaluations.
+# Production v2 asks for independent field decisions only. Their aggregate is
+# deterministic and must not be a second, potentially conflicting model output.
+FIELD_JUDGE_PROMPT = JUDGE_PROMPT.split("Return only JSON:", 1)[0] + """Return only JSON:
+{"fields": {each supplied field pointer:
+"supported|contradiction|unbacked|uncertain"}}.
+Return exactly one decision for EVERY supplied field pointer, with no extra
+fields. Do not return an overall relation: the validator derives it from these
+decisions. No prose, no extra keys. Timestamps are evaluated separately.
+"""
+FIELD_PROMPT_HASH = content_hash(FIELD_JUDGE_PROMPT)
+
 
 def judge_response(reference: dict, response: dict, judge: Callable,
                    *, evaluator_id: str, calibration: dict | None = None) -> dict:
+    prompt = getattr(judge, "prompt", JUDGE_PROMPT)
+    prompt_hash = content_hash(prompt)
     ref = Reference.model_validate(reference)
     pred = validate_events(response, ref.duration)
     decisions = []
     for i, j in candidate_pairs(ref, pred):
-        result = judge(JUDGE_PROMPT, {"narration": ref.events[j].text,
+        result = judge(prompt, {"narration": ref.events[j].text,
                                      "event_fields": scored_text(pred.events[i])})
         if not isinstance(result, dict) or set(result) != {"relation", "fields"}:
             raise ValueError("invalid_judge_output")
         decisions.append({"prediction": i, "reference": j, **result})
     calibrated = bool(calibration and calibration.get("passed") is True
                       and calibration.get("evaluator_id") == evaluator_id
-                      and calibration.get("prompt_hash") == PROMPT_HASH)
+                      and calibration.get("prompt_hash") == prompt_hash)
     score = score_events(reference, response, decisions, evaluator_id=evaluator_id,
                          calibrated=calibrated)
-    return {"score": score, "decisions": decisions, "prompt_hash": PROMPT_HASH,
+    return {"score": score, "decisions": decisions, "prompt_hash": prompt_hash,
             "calibration_hash": content_hash(calibration) if calibration else None}
 
 
@@ -58,6 +72,7 @@ def wilson(successes: int, total: int, z: float = 1.959963984540054) -> list[flo
 
 
 def calibrate(cases: list[dict], judge: Callable, *, evaluator_id: str) -> dict:
+    prompt = getattr(judge, "prompt", JUDGE_PROMPT)
     if len(cases) != 300 or len({c["case_id"] for c in cases}) != 300:
         raise ValueError("calibration_requires_300_unique_cases")
     if any(c["partition"] != "calibration" for c in cases):
@@ -70,7 +85,7 @@ def calibrate(cases: list[dict], judge: Callable, *, evaluator_id: str) -> dict:
         if case["input"]["event_fields"] != scored_text(Event.model_validate(case["event"])):
             raise ValueError("calibration_event_binding_mismatch")
         try:
-            raw = judge(JUDGE_PROMPT, case["input"])
+            raw = judge(prompt, case["input"])
             if not isinstance(raw, dict) or set(raw) != {"relation","fields"}:
                 raise ValueError("invalid_judge_output")
             result = {"prediction": 0, "reference": 0, **raw}
@@ -86,7 +101,7 @@ def calibrate(cases: list[dict], judge: Callable, *, evaluator_id: str) -> dict:
     contradictions = [r for r in rows if r["expected"]["relation"] == "contradiction"]
     accepted = sum(r["actual"]["relation"] == "supported" for r in contradictions)
     accuracy, false_accept = correct/300, accepted/len(contradictions) if contradictions else None
-    return {"evaluator_id": evaluator_id, "prompt_hash": PROMPT_HASH,
+    return {"evaluator_id": evaluator_id, "prompt_hash": content_hash(prompt),
             "cases_hash": content_hash(cases), "rows": rows, "total": 300,
             "accuracy": accuracy, "accuracy_wilson_95": wilson(correct, 300),
             "decision_unit": "event/reference relation; every field must be valid and determine the relation",

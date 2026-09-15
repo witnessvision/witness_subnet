@@ -59,6 +59,12 @@ Provider, model, effort, prompt, adapter and calibration define the ranking seri
 Changing them requires matching calibration and a **new round-state root**. Keep
 the authoritative budget ledger unchanged when changing providers or keys.
 
+The current judge is `fields-only-v2`. Luna judges each field; code derives the
+overall relation, so a second model-generated summary cannot contradict those
+fields. Every required field must still be valid. Upgrading from `all-fields-v1`
+requires fresh calibration, a separate cache and a new ranking root; do not restart
+this version against the old scheduler identity. See [judge migration](production-v5.2.md#evaluator-and-budget).
+
 The shipped policy allows **$9 per validator per UTC day**, including calibration
 and reevaluation. Its companion miner allocation is $1/day. The fixed role limits
 bound one deployment's combined spend to $10; this is not a subnet-wide allowance.

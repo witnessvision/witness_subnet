@@ -12,6 +12,7 @@ import httpx
 from witness.events import canonical_bytes, content_hash
 from witness.storage import write_private
 from witness.budget import DailyBudget, BudgetUnavailable
+from witness.events_evaluation import FIELD_JUDGE_PROMPT
 
 # Standard <=272k rates, checked 2026-09-13 at developers.openai.com/api/docs/pricing.
 RATES = {"gpt-5.6-sol": (4., .4, 20.), "gpt-5.6-terra": (2., .2, 12.),
@@ -196,3 +197,37 @@ class ApiJudge:
         if raw["relation"] != derived:
             raise ValueError("judge_inconsistent_fields")
         return raw
+
+
+class ApiFieldJudge(ApiJudge):
+    """Field decisions are semantic; their precedence is computed locally.
+
+    Raw model output remains in ApiText's provider/request-scoped cache. The
+    canonical decision passed to the scorer retains every field unchanged.
+    ApiJudge above remains the strict v1 adapter for historical experiments.
+    """
+    prompt = FIELD_JUDGE_PROMPT
+    relations = ("contradiction", "uncertain", "unbacked", "supported")
+
+    @property
+    def identity(self):
+        return self.model.identity + ":fields-only-v2"
+
+    def __call__(self, prompt, value):
+        if prompt != self.prompt:
+            raise ValueError("judge_prompt_identity_mismatch")
+        fields = value["event_fields"]
+        if not isinstance(fields, dict) or not fields or any(type(k) is not str for k in fields):
+            raise ValueError("invalid_judge_fields")
+        relation = {"type": "string", "enum": list(self.relations)}
+        schema = {"type": "object", "properties": {
+            "fields": {"type": "object", "properties": {k: relation for k in fields},
+                       "required": list(fields), "additionalProperties": False}},
+            "required": ["fields"], "additionalProperties": False}
+        raw = self.model(prompt, value, schema=schema)
+        if (not isinstance(raw, dict) or set(raw) != {"fields"}
+                or not isinstance(raw["fields"], dict) or set(raw["fields"]) != set(fields)
+                or any(type(v) is not str or v not in self.relations for v in raw["fields"].values())):
+            raise ValueError("invalid_judge_fields")
+        derived = next(r for r in self.relations if r in raw["fields"].values())
+        return {"relation": derived, "fields": dict(raw["fields"])}

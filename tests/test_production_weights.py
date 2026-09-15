@@ -16,7 +16,8 @@ from witness.subnet.chain import WeightSubmission
 def evidence():
     calibration={'total':300,'passed':True,'accuracy':.98,'contradiction_acceptance':0.,
                  'prompt_hash':PROMPT_HASH,'evaluator_id':'luna'}
-    identity={'evaluator':{'judge_model':'gpt-5.6-luna','judge_effort':'low','evaluator_id':'luna'},
+    identity={'evaluator':{'judge_model':'gpt-5.6-luna','judge_effort':'low','evaluator_id':'luna',
+                           'prompt_hash':PROMPT_HASH},
               'calibration_hash':content_hash(calibration)}
     miner={'uid':117,'hotkey':'candidate','planned':5,'sent':5,'valid':5,'scored':5,
            'max_elapsed_s':175.,'mean_f1':.99,'mean_score':.97,'ema':.5,'eligible':True}
@@ -28,7 +29,8 @@ def evidence():
 def test_promotion_requires_calibration_fifteen_valid_and_complete_comparisons():
     calibration,reports=evidence()
     assert promotion_gate(reports,calibration,'candidate')['passed']
-    for field,value in [('accuracy',.94),('contradiction_acceptance',.03),('evaluator_id','sol')]:
+    for field,value in [('accuracy',.94),('contradiction_acceptance',.03),('evaluator_id','sol'),
+                        ('prompt_hash','different-prompt')]:
         changed={**calibration,field:value}
         assert not promotion_gate(reports,changed,'candidate')['passed']
     for field,value in [('valid',4),('scored',4),('sent',4),('mean_f1',.5),('mean_score',.8),('max_elapsed_s',180.)]:
@@ -36,6 +38,20 @@ def test_promotion_requires_calibration_fifteen_valid_and_complete_comparisons()
         assert not promotion_gate(changed,calibration,'candidate')['passed']
     changed=copy.deepcopy(reports);changed[1]['complete']=False
     assert not promotion_gate(changed,calibration,'candidate')['passed']
+
+
+def test_field_judge_promotion_requires_matching_new_calibration_and_prompt():
+    from witness.events_evaluation import FIELD_PROMPT_HASH
+    calibration, reports = evidence()
+    calibration['prompt_hash'] = FIELD_PROMPT_HASH
+    calibration['evaluator_id'] = 'luna:fields-only-v2'
+    for report in reports:
+        report['identity']['evaluator'].update(prompt_hash=FIELD_PROMPT_HASH,
+                                               evaluator_id=calibration['evaluator_id'])
+        report['identity']['calibration_hash'] = content_hash(calibration)
+    assert promotion_gate(reports, calibration, 'candidate')['passed']
+    reports[0]['identity']['evaluator']['prompt_hash'] = PROMPT_HASH
+    assert not promotion_gate(reports, calibration, 'candidate')['passed']
 
 
 def test_policy_returns_to_burn_when_incomplete_stale_or_uid_reused():

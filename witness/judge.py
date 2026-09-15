@@ -8,8 +8,8 @@ import json
 from pathlib import Path
 
 from witness.events import content_hash, scored_text, validate_events
-from witness.events_evaluation import JUDGE_PROMPT, PROMPT_HASH, judge_response
-from witness.providers import ApiText, ApiJudge, load_key
+from witness.events_evaluation import JUDGE_PROMPT, judge_response
+from witness.providers import ApiText, ApiFieldJudge, load_key
 from witness.score_v5_0_0 import Reference, candidate_pairs
 
 
@@ -21,17 +21,18 @@ class JudgeConfig:
     max_tokens: int = 2048
 
     def build(self, cache, *, budget_path, cache_only=False):
-        return ApiJudge(ApiText(self.judge_model, Path(cache), effort=self.judge_effort,
+        return ApiFieldJudge(ApiText(self.judge_model, Path(cache), effort=self.judge_effort,
                                max_tokens=self.max_tokens, provider=self.judge_provider,
                                budget_path=budget_path, budget_role="validator", cache_only=cache_only))
 
     def identity(self, cache, *, budget_path):
         judge = self.build(cache, budget_path=budget_path)
-        return {**asdict(self), "evaluator_id": judge.identity, "prompt_hash": PROMPT_HASH,
+        return {**asdict(self), "evaluator_id": judge.identity, "prompt_hash": content_hash(judge.prompt),
                 "score_version": "5.0.0", "reward_version": "5.1.0"}
 
 
 def parallel_score(value, judge, calibration_report=None):
+    prompt = getattr(judge, "prompt", JUDGE_PROMPT)
     ref = Reference.model_validate(value["reference"])
     pred = validate_events(value["response"], ref.duration)
     inputs = {}
@@ -39,9 +40,12 @@ def parallel_score(value, judge, calibration_report=None):
         item = {"narration": ref.events[j].text, "event_fields": scored_text(pred.events[i])}
         inputs[content_hash(item)] = item
     with ThreadPoolExecutor(max_workers=4) as pool:
-        decisions = dict(pool.map(lambda item: (item[0], judge(JUDGE_PROMPT, item[1])), inputs.items()))
+        decisions = dict(pool.map(lambda item: (item[0], judge(prompt, item[1])), inputs.items()))
+    def stored(_prompt, item):
+        return decisions[content_hash(item)]
+    stored.prompt = prompt
     result = judge_response(value["reference"], value["response"],
-                            lambda prompt, item: decisions[content_hash(item)],
+                            stored,
                             evaluator_id=judge.identity, calibration=calibration_report)
     result["execution_policy"] = "identical-independent-pairs-parallel-4"
     return result

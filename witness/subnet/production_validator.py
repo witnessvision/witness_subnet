@@ -9,7 +9,6 @@ from pathlib import Path
 import time
 
 from witness.events import EventsTaskSpec, content_hash
-from witness.events_evaluation import PROMPT_HASH
 from witness.mp4_v5_2 import send_clip
 from witness.score_v5_0_0 import score_events
 from witness.score_v5_1_0 import latency_reward
@@ -50,7 +49,8 @@ class ProductionValidator:
 
     def calibrated(self):
         c = self.calibration
-        return bool(c and c.get("passed") is True and c.get("prompt_hash") == PROMPT_HASH
+        return bool(c and c.get("passed") is True
+                    and c.get("prompt_hash") == self.identity["evaluator"]["prompt_hash"]
                     and c.get("evaluator_id") == self.identity["evaluator"]["evaluator_id"])
 
     async def dispatch(self, task, job, endpoint):
@@ -90,7 +90,8 @@ class ProductionValidator:
                             evaluation = await self.evaluate(job, result["received"])
                         reproduced = score_events(job["reference"], result["received"]["response"], evaluation["decisions"],
                             evaluator_id=self.identity["evaluator"]["evaluator_id"], calibrated=self.calibrated())
-                        if evaluation["score"] != reproduced or evaluation["prompt_hash"] != PROMPT_HASH:
+                        if (evaluation["score"] != reproduced
+                                or evaluation["prompt_hash"] != self.identity["evaluator"]["prompt_hash"]):
                             raise ValueError("stored_decisions_do_not_reproduce_score")
                         result.update(evaluation=evaluation, evaluation_status="complete", f1=reproduced["f1"],
                             reward=latency_reward(reproduced["f1"], result["miner_elapsed_s"])["reward"])
