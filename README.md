@@ -2,52 +2,68 @@
 
 **Understand video. Not just watch it.**
 
-Witness is a video agent subnet project on Bittensor, building an open network
-where specialized agents compete to reconstruct video accurately and efficiently.
+Witness is a video agent subnet on **Bittensor Finney SN20**. Miners receive video
+clips and return structured events; validators compare their responses with
+private human annotations and rank eligible miners.
 
-Witness defines tasks in which miners inspect video through metered observation
-tools and return a structured reconstruction. Validators score responses against
-private reference labels and aggregate eligible scores into network weights.
+[Website](https://witnessvision.io/) · [Validator setup](docs/validator.md) ·
+[MP4 protocol and miner integration](docs/production-v5.2.md)
 
-[Website](https://witnessvision.io/) ·
-[Base miner](docs/miner.md) · [Validator setup: CPU, no API key](docs/validator.md)
+## Production MP4 5.2
 
-This repository contains the public protocol, validator, observation API, scoring
-code, synthetic scene utilities and a minimal base miner. The base miner returns
-an empty reconstruction; implement your own inference in a separate package.
-No trained miner, model weights or private evaluation data are distributed here.
+- Five shared random MP4 clips per round, 60–120 seconds each, sent to every
+  registered endpoint with an announced IP and port.
+- Hotkey-signed requests and responses, complete-body hashes, random task IDs
+  and stripped metadata. Original identifiers and annotations stay private.
+- Semantic evaluation using `gpt-5.6-luna` at `low` effort. SayGM is the default
+  provider; the OpenAI adapter is also available. Only the selected API key is
+  required.
+- Annotation F1 with latency reward:
+  `score = F1 * (0.7 + 0.3 * max(0, 1 - seconds/180))`.
+  Complete rounds update hotkey EMA with alpha 0.2. Highest eligible EMA wins;
+  lower UID breaks a tie.
+- A persistent scheduler and separate weight writer. After activation, complete
+  comparisons request 70% burn / 30% winner. Incomplete comparisons or no valid
+  winner request full burn. Revealed chain state must be checked independently.
+- Fixed UTC daily budgets with persistent reservations: $9 for a deployment's
+  validator and $1 for its companion miner, including calibration/reevaluation.
 
-The production scoring contract is **Witness Scorer v1.1.0**, the validator's
-default. Quality at least `0.4` receives credit; lower quality receives zero.
-Independent benchmark validation and competitive miner quality remain separate
-from the release version; local tests and diagnostic rounds do not establish them.
+Transport 5.2 uses event schema 5.0, annotation scorer 5.0.0 and latency reward
+5.1.0; these are distinct versioned contracts. The wire limits are 128 MiB per MP4,
+2 MiB per response and a 180-second external deadline. See the
+[production contract](docs/production-v5.2.md) for signing, cancellation, provider
+identity, ranking and activation requirements.
 
-The local [temporal benchmark 2.0](docs/temporal-benchmark.md) adds randomized
-interaction histories and duplicate comparison based on scored facts. It is
-selected explicitly; the production default remains unchanged. See the
-[local temporal check](docs/temporal-local.md) to exercise its protocol and scorer.
+## Participate
 
-The local [grounded benchmark 3.0 candidate](docs/grounded-benchmark.md) adds
-action/result evidence, reviewed natural-video sequences, and shared credit for
-partial copies. Its validation scope and source-memorization limits are explicit;
-it is not selected by default.
+**Validators:** follow [the MP4 deployment guide](docs/validator.md). You need
+Python 3.11+, FFmpeg, a permitted hotkey, private evaluation assets and one funded
+credential: `GM_API_KEY` for SayGM or `OPENAI_API_KEY` for OpenAI. No local GPU or
+inference model is required. The guide includes evaluator/writer JSON examples,
+state handling and chain verification. The public package does not distribute
+private catalogs or calibration evidence.
 
-## Why Witness
+**Miners:** use the empty, model-independent serving adapter described in
+[MP4 integration](docs/production-v5.2.md#wire-contract), implementing your own
+inference in a separate package. The [older base miner guide](docs/miner.md)
+describes the legacy metered-observation protocol.
 
-Understanding video involves more than identifying what appears in a frame.
-An agent must connect events over time, recover dialogue and visible text, and
-answer questions using the evidence it observes. Witness makes those outputs
-explicit and measures the observations used to produce them.
+This repository contains the public protocol, validators, scoring, source
+preparation, observation API, empty base miners, synthetic tests and documentation.
+Competitive miner implementations, model weights, indexes, private data and
+operational evidence belong outside it. Benchmark concordance on indexed content
+does not establish general video understanding.
 
-Miners choose when to inspect frames, listen to audio or request available
-transcripts within a fixed budget. The aim is to reward useful reconstruction
-and efficient evidence gathering. The protocol is model-independent: participants
-can develop their own models, tool strategies and inference systems.
+<a id="get-started"></a>
 
-## Get started
+## Legacy protocols and local quickstart
 
-Requirements: Python 3.11+, FFmpeg/ffprobe and the eSpeak NG runtime library.
-On Ubuntu/Debian, the system packages are `ffmpeg` and `espeak-ng`.
+The `witness-validator` console command still selects the earlier synthetic
+validator; `--mainnet` uses scorer 1.1.0 and 100% burn. It does **not** launch
+MP4 5.2. See [legacy validator setup](docs/validator-legacy.md).
+
+The following local synthetic check needs no API key, wallet or chain connection.
+Install FFmpeg and eSpeak NG (`ffmpeg` and `espeak-ng` on Ubuntu/Debian), then:
 
 ```bash
 git clone https://github.com/witnessvision/witness_subnet.git
@@ -59,60 +75,15 @@ python3 -m venv .venv
   --scenes 1 --scene data/scenes/quickstart --round-root rounds/quickstart
 ```
 
-Use a fresh output directory when generating scenes. The local round needs no
-wallet, GPU, provider credential or chain connection. It scores an empty base
-miner response and records simulated weights under `rounds/quickstart/`.
-`--allow-unlocked` labels this generated fixture round as diagnostic. Benchmark
-locks are optional and selected explicitly with `--benchmark-lock`.
+Use fresh output directories. This diagnostic scores an empty base miner and
+records simulated weights; it is not an MP4 production acceptance test.
 
-## Protocol
-
-1. A validator prepares a private scene and commits to its seed.
-2. Each miner receives public task metadata, questions, a deadline and its own
-   observation session with independent visual, audio and transcript budgets.
-3. The miner returns events, dialogue, shots, visible text, audio events,
-   intentional errors and question answers as structured JSON.
-4. The validator scores the reconstruction using its own metering records,
-   applies eligibility and duplicate rules, and aggregates round scores.
-
-See the [miner guide](docs/miner.md) and [validator guide](docs/validator.md).
-Observation units are benchmark units, not a currency price. The mainnet preset
-provides frames and audio without label-derived transcript hints.
-
-## Evaluation
-
-Validators compare structured predictions against private reference labels.
-Scoring covers events, dialogue, shot boundaries, on-screen text, audio events,
-intentional errors and answers to the task's questions. Quality gates determine
-eligibility before observation efficiency contributes to the final score.
-
-Round reports also expose reconstruction quality, quality times efficiency,
-threshold pass rates and component scores by difficulty, including failed scenes
-in the denominator. Production scorer `1.1.0` grants credit when quality is at least `0.4`;
-quality below `0.4` receives zero. Efficiency and duplicate sharing still apply.
-The mainnet preset uses a five-round mean followed by EMA alpha `0.2`, and sends
-all miners a numerical round report through `WitnessFeedback`.
-See [the production scoring contract](docs/scoring.md#production-scorer-v110)
-for selection and offline comparison of saved rounds.
-
-Observation usage comes from validator-owned session records rather than miner
-cost claims. Scoring versions are explicit, and round artifacts record the
-configuration and evidence needed to inspect results. See the
-[validator guide](docs/scoring.md#scoring-and-artifacts) for aggregation,
-duplicate handling and weight submission behavior.
-
-## Participate
-
-- **Miners:** start with the [base miner guide](docs/miner.md), implement
-  `reconstruct(task)` in your own package, and verify budgets and deadlines locally.
-- **Validators:** follow the [CPU-only SN20 setup](docs/validator.md). No GPU or
-  OpenAI/API key is needed. `--mainnet` prepares scenes automatically and applies
-  100% burn weights; miner evaluations remain diagnostic.
-- **Developers and researchers:** review the public protocol and scoring code,
-  reproduce local checks, and open issues or pull requests with focused findings.
-
-Mainnet is Finney SN20. Network validation requires a registered hotkey with a
-validator permit; the local quickstart works without a wallet or chain connection.
+Earlier contracts remain available:
+[scorer 1.1.0](docs/scoring.md#production-scorer-v110),
+[temporal 2.0](docs/temporal-benchmark.md),
+[grounded 3.0](docs/grounded-benchmark.md),
+[structured-events diagnostics](docs/structured-events-v5.md) and
+[experimental MP4 5.1](docs/mp4-transport.md).
 
 ## Development
 
@@ -120,32 +91,15 @@ validator permit; the local quickstart works without a wallet or chain connectio
 .venv/bin/python -m pytest -q
 ```
 
-The public tests generate their own media fixtures. Core package dependencies
-are declared in `pyproject.toml`.
+Dependencies are declared in `pyproject.toml`. Public tests use synthetic fixtures
+and have no dependency on a competitive miner or private evaluation data.
 
 | Directory | Responsibility |
 | --- | --- |
-| `witness/subnet/` | Protocol, base miner, validator and chain adapter |
-| `witness/tools/` | Observation API, metering and client |
-| `witness/score/` | Historical scoring and validator test oracles |
-| `witness/score_v*.py` | Explicitly selected scoring versions |
-| `witness/recompose/`, `witness/sources/` | Validator-side scene preparation |
-| `tests/` | Public protocol and implementation checks |
-| `docs/` | Miner and validator onboarding |
-# Structured events v5
-
-The [full-clip HTTP transport 5.1](docs/mp4-transport.md) sends a standalone MP4
-directly to a miner without requiring chain access.
-
-The additive [v5 diagnostic contract](docs/structured-events-v5.md) defines
-point events, annotation-concordance scoring and a single-target epoch runner.
-It does not submit weights. Dataset and miner qualification are separate from
-implementation tests; existing protocol/scorer versions remain available.
-
-## Production MP4 protocol 5.2
-
-[Production validator and miner integration](docs/production-v5.2.md) describes hotkey-signed
-requests and responses, all announced endpoints, persistent five-clip rounds, Luna evaluation
-and fixed UTC daily budgets. The existing experimental 5.1 transport remains available.
-The separate weight writer requires calibration and production acceptance evidence before
-70% burn / 30% winner activation; incomplete comparisons select full burn.
+| `witness/subnet/` | Chain adapters, validators, base miner and weight writers |
+| `witness/mp4_v5_2.py` | Signed production transport |
+| `witness/judge.py`, `witness/providers.py`, `witness/budget.py` | Evaluator, providers and daily accounting |
+| `witness/score_v*.py` | Versioned scoring |
+| `witness/sources/` | Validator-side source preparation |
+| `witness/tools/` | Media utilities and legacy observation API |
+| `tests/`, `docs/` | Public tests and onboarding |

@@ -1,5 +1,8 @@
 # Production MP4 5.2
 
+For installation, provider credentials, private assets and complete evaluator/writer
+configuration examples, start with [Run a Witness MP4 validator](validator.md).
+
 The public package contains the validator, provider adapters, scorer, transport
 and an empty miner serving adapter. Private datasets, evaluation inputs/results
 and competitive miner implementations are never part of this package.
