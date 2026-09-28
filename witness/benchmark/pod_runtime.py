@@ -111,6 +111,7 @@ def _worker(job, pipe):
     except Exception:
         pipe.send({"error": "gpu_unhealthy", "exit": 3})
         return
+    pipe.send({"loading": True, "hardware_id": hardware})
     weights = Path(job["weights"])
     if not weights.is_dir() or any(weights.rglob("*.py")):
         pipe.send({"error": "invalid_model_directory", "exit": 2})
@@ -201,14 +202,26 @@ def supervise(job, out, *, worker=_worker, context=None):
     try:
         # Jobs are immutable and retries use a new output path; never append stale attempts.
         with out.open("w") as stream:
-            for task in job["tasks"]:
+            for index, task in enumerate(job["tasks"]):
                 if process is None:
+                    hardware = None
                     pipe, child = context.Pipe()
                     process = context.Process(target=_entry, args=(worker, job, child))
                     process.start()
                     child.close()
-                    ready = receive(job.get("load_timeout_s", 120))
-                    if ready is None:
+                    load_deadline = time.monotonic() + job.get("load_timeout_s", 120)
+                    ready = receive(max(0., load_deadline - time.monotonic()))
+                    if ready and ready.get("loading"):
+                        hardware = ready["hardware_id"]
+                        ready = receive(max(0., load_deadline - time.monotonic()))
+                    if ready is None or ready.get("exit") == 2:
+                        if hardware is None:
+                            return 3  # GPU health was not established; do not score the model.
+                        for pending in job["tasks"][index:]:
+                            stream.write(json.dumps({"task_id": pending["task_id"], "status": "invalid",
+                                         "raw": "", "elapsed_s": pending["deadline_s"],
+                                         "hardware_id": hardware}) + "\n")
+                        stream.flush()
                         return 2
                     if ready.get("exit"):
                         if ready.get("error") == "gpu_unhealthy":

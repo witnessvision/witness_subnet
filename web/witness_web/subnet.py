@@ -10,13 +10,30 @@ from fastapi.responses import FileResponse, StreamingResponse
 from witness.benchmark.dashboard import Projection
 
 
-def add_subnet_routes(app, sources=None):
+def add_subnet_routes(app, sources=None, *, telemetry_root=None):
     if sources is None:
         sources = json.loads(os.environ.get('WITNESS_VALIDATOR_SOURCES', '[]'))
     if not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
         raise ValueError('WITNESS_VALIDATOR_SOURCES_must_be_a_JSON_string_array')
-    view = Projection(sources)
+    view = Projection(sources, Path(telemetry_root) / 'telemetry' if telemetry_root else None)
     app.state.subnet_projection = view
+    if telemetry_root:
+        from witness.benchmark.telemetry import MAX_BYTES, TelemetryStore
+        receiver = TelemetryStore(telemetry_root)
+
+        @app.post('/api/telemetry')
+        async def telemetry(request: Request):
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > MAX_BYTES:
+                    raise HTTPException(413, 'Telemetry too large')
+            try:
+                return receiver.accept(json.loads(body))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                raise HTTPException(400, 'Invalid signed telemetry') from None
+            except OSError:
+                raise HTTPException(503, 'Finalized validator membership unavailable') from None
 
     def read(call):
         try:

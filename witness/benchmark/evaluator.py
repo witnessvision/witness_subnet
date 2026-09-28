@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import threading
 import time
@@ -56,9 +57,9 @@ class Evaluator:
         gpu = make_gpu(config['gpu'], root)
         provider = config.get('provider', 'openai')
         labeler = ApiText('gpt-6-luna', root / 'label-cache', provider=provider, effort='low', max_tokens=16000,
-                          budget_path=str(root / 'label-budget.sqlite3'))
+                          budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
         api = ApiText('gpt-5.6-terra', root / 'judge-cache', provider=provider, effort='low', max_tokens=16000,
-                      budget_path=str(root / 'budget.sqlite3'))
+                      budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
         base = dict(runtime_hash=content_hash(runtime_identity(config['gpu'])), preprocessing_hash=PREPROCESSOR_ID,
                     reference_kind='machine', min_annotators=1, confirmation_size=2, screen_size=1,
                     quality_floor=0., judge_id='pending')
@@ -86,6 +87,9 @@ class Evaluator:
                 raise InfrastructureError('miner_endpoint_unavailable')
             try:
                 client = ModelClient(keypair, entry['hotkey'], address['host'], address['port'], submission)
+                client.cancelled = cancelled
+                client.remaining_s = lambda: (max(0., evaluator.deadline - time.monotonic())
+                                               if evaluator.deadline else 30.)
                 directory, info = client.download(cache, cancelled=cancelled, accepted_architectures=enabled,
                                                   cache_key=entry['model_id'])
             except NotImplementedError as error:
@@ -98,8 +102,14 @@ class Evaluator:
                    batch_factory=lambda window: window_batch(root / 'pool-v2', window['id'], hotkey,
                        gpu=gpu, api=labeler, policy=policy), download=download,
                    runner=lambda submissions, job: PodRunner(gpu, submissions, policy, job))
-        api.request_timeout_s = lambda: min(60., evaluator.deadline - time.monotonic()) if evaluator.deadline else 60.
+        api.request_timeout_s = labeler.request_timeout_s = lambda: (
+            min(30., evaluator.deadline - time.monotonic()) if evaluator.deadline else 30.)
         return evaluator
+
+    def progress(self, stage, window, model=None, completed=0):
+        write_private(self.root / 'progress.json', {'stage': stage, 'window_id': window['id'],
+                      'model_id': model, 'completed_clips': completed, 'total_clips': 10,
+                      'updated_unix': time.time()})
 
     def update(self, snapshot, *, start_worker=True):
         """Called by the chain thread; never runs inference or paid labeling."""
@@ -211,6 +221,7 @@ class Evaluator:
             return cached
         if self._cancelled(window):
             raise InterruptedError('window_closed')
+        self.progress('downloading', window, model_id)
         item = self.download(entry, snapshot, lambda: self._cancelled(window))
         content_path = self.root / 'content-owners.json'
         owners = json.loads(content_path.read_text()) if content_path.exists() else {}
@@ -242,6 +253,7 @@ class Evaluator:
             if self._cancelled(window):
                 raise InterruptedError('evaluation_budget_or_epoch_closed')
             batch = selected[first:last]
+            self.progress('evaluating', window, model_id, first)
             executions = run([model_id], [c.task for c, _ in batch], [Path(c.media_path) for c, _ in batch])[model_id]
             hardware = getattr(run, 'hardware_id', None)
             if hardware_file.exists() and json.loads(hardware_file.read_text())['id'] != hardware:
@@ -258,6 +270,7 @@ class Evaluator:
                               root=root / 'judge')
                 grades.append({**value, 'id': case.task.clip_sha256, 'duration': case.task.duration,
                                'start': row['start'], 'file': row['file']})
+                self.progress('judging', window, model_id, len(grades))
                 if len(grades) % EVAL.clips_per_video == 0:
                     write_private(progress_path, {'grades': grades, 'continue_to_full': resume})
             first = last
@@ -339,40 +352,52 @@ class Evaluator:
         pending = [r for r in pending if r['model_id'] not in partials
                    or r['model_id'] in comparison['inconclusive']]
         if not pending or self._cancelled(window):
+            self.progress('waiting', window)
             if self.gpu:
                 self.gpu.stop_if_idle()
             return
         entry = {**pending[0], 'uid': window['candidates'][pending[0]['model_id']]['uid']}
         self.triggers.start(entry['id'], window['id'])
-        baseline = None
         try:
-            rows, selected = self._batch(window)
-            # Source preparation is shared by the window. The paired model and
-            # judging attempt then has fifteen minutes and cannot cross an epoch.
             self.deadline = time.monotonic() + 900.
-            if window['king']:
-                king = {**window['king'], 'uid': snapshot['uids'][window['king']['hotkey']]}
-                baseline = self._evaluate(king, window, snapshot, rows, selected)
-                history = self.ledger.history(window['start_block'], snapshot['block'] + 1)
-                if not any(r['hotkey'] == self.hotkey and r['value'].startswith('wr2|') and
-                           (lambda v: v.flags & BASELINE and v.model_id == king['model_id'])(Result.parse(r['value']))
-                           for r in history):
-                    self._enqueue(king, window, baseline, None, flags=CONTROLS_OK | BASELINE)
-            try:
-                scored = self._evaluate(entry, window, snapshot, rows, selected, baseline=baseline,
-                                        resume=entry['model_id'] in partials)
-                flags = CONTROLS_OK | (EARLY_STOP if scored.get('early_stop') else 0)
-            except ModelRejected as error:
-                scored = {'quality': 0., 'reward': 0., 'per_video': {}, 'grades': [], 'reason': str(error)[:120]}
-                flags = CONTROLS_OK | REJECTED
-            if self._cancelled(window):
-                raise InterruptedError('window_closed')
-            self._enqueue(entry, window, scored, baseline, flags=flags, trigger_id=entry['id'])
+            if self.gpu:
+                self.gpu.cancelled = lambda: self._cancelled(window)
+                self.gpu.remaining_s = lambda: max(0., self.deadline - time.monotonic())
+            with self.gpu.lease() if self.gpu else nullcontext():
+                self._attempt(entry, window, snapshot, partials)
         except Exception as error:
+            self.progress('deferred', window, entry['model_id'])
             self.triggers.defer(entry['id'], type(error).__name__, snapshot['block'] + min(300, 10 * 2**min(entry['attempts'], 5)))
             raise
+        finally:
+            if self.gpu:
+                self.gpu.cancelled = lambda: False
+                self.gpu.remaining_s = lambda: float('inf')
+
+    def _attempt(self, entry, window, snapshot, partials):
+        baseline = None
+        self.progress('preparing', window, entry['model_id'])
+        rows, selected = self._batch(window)
+        if window['king']:
+            king = {**window['king'], 'uid': snapshot['uids'][window['king']['hotkey']]}
+            baseline = self._evaluate(king, window, snapshot, rows, selected)
+            history = self.ledger.history(window['start_block'], snapshot['block'] + 1)
+            if not any(r['hotkey'] == self.hotkey and r['value'].startswith('wr2|') and
+                       (lambda v: v.flags & BASELINE and v.model_id == king['model_id'])(Result.parse(r['value']))
+                       for r in history):
+                self._enqueue(king, window, baseline, None, flags=CONTROLS_OK | BASELINE)
+        try:
+            scored = self._evaluate(entry, window, snapshot, rows, selected, baseline=baseline,
+                                    resume=entry['model_id'] in partials)
+            flags = CONTROLS_OK | (EARLY_STOP if scored.get('early_stop') else 0)
+        except ModelRejected as error:
+            scored = {'quality': 0., 'reward': 0., 'per_video': {}, 'grades': [], 'reason': str(error)[:120]}
+            flags = CONTROLS_OK | REJECTED
+        if self._cancelled(window):
+            raise InterruptedError('window_closed')
+        self._enqueue(entry, window, scored, baseline, flags=flags, trigger_id=entry['id'])
 
     def stop(self):
         self.stopping.set()
         if self.thread:
-            self.thread.join(timeout=1)
+            self.thread.join(timeout=45)

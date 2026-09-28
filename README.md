@@ -3,7 +3,8 @@
 Witness is a video-understanding subnet for Bittensor SN20. Miners serve immutable
 model weights to evaluator validators. Evaluators compare models on private,
 random audiovisual clips; CPU followers reproduce the decision from finalized
-on-chain scores. **One king receives 100% of the validator's weight.**
+on-chain scores. **70% of each validator's weight goes to burn and 30% to one king.**
+Before the first king is decided, the allocation is **100% burn**.
 
 [Website](https://witnessvision.io/) · [Miner guide](docs/miner.md) ·
 [Validator guide](docs/validator.md) · [Scoring](docs/benchmark.md) ·
@@ -47,8 +48,10 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-Evaluators also need ffmpeg and an explicitly configured GPU/API budget. The
-follower is the default and requires neither. Chain writes require explicit
+Evaluators also need ffmpeg, a GPU and labeling/judging API credentials.
+A single GPU machine can run the validator, evaluation and web/API together;
+no separate CPU server or GPU service is required. API spending limits are optional
+operator configuration, independent of consensus. The follower remains the default. Chain writes require explicit
 flags. See the activation checklist before starting paid evaluation or weights.
 
 The public repository contains protocol, scoring, validator runtime, tests, an

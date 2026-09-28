@@ -102,18 +102,24 @@ function overview(d) {
   if (w) { const p = el("p"); p.append(el("b", `#${w.id} `), tag(w.state)); win.append(p, el("div", `epochs ${w.start_epoch ?? "?"}–${w.end_epoch ?? "?"} · start block ${int(w.start_block)} · end block ${known(w.end_block) ? int(w.end_block) : "pending finalization"}`, "small muted")); }
   else win.append(el("p", "No window reported.", "muted"));
   const wt = d.weights || {}, ws = el("div", null, "card"), ol = el("ol", null, "steps"); ws.append(el("div", "Weights", "label"));
-  for (const [k, label] of [["decision", "Decision"], ["submitted", "Submitted"], ["applied", "Applied"]]) {
+  const pct = f => Number.isFinite(f) ? `${Math.round(f * 1000) / 10}%` : "?";
+  const vec = x => Array.isArray(x.uids) ? (x.uids.length ? x.uids.map((u, i) => `UID ${u} ${pct(x.weights?.[i])}`).join(" · ") : "empty vector") : "vector unknown";
+  const it = wt.intended;
+  if (it) ws.append(el("p", Number.isFinite(it.burn_fraction) && Number.isFinite(it.king_fraction) ? `Intended: ${pct(it.burn_fraction)} burn (UID ${it.burn_uid ?? "?"}) · ${pct(it.king_fraction)} king (UID ${it.king_uid ?? "none"})` : "Intended split unknown", "small"));
+  for (const [k, label] of [["decision", "Decision"], ["intended", "Intended"], ["submitted", "Submitted"], ["applied", "Applied"]]) {
     const x = wt[k], li = el("li"); li.append(el("b", label));
-    if (x) { li.append(id(x.hotkey), el("span", `block ${int(x.block)}`, "small muted")); if (k === "submitted") li.append(tag(x.status)); if (k !== "decision" && wt.decision && x.hotkey !== wt.decision.hotkey) li.append(el("span", "differs from decision", "tag warn")); if (k === "decision" && Array.isArray(x.inconclusive) && x.inconclusive.length) li.append(el("span", `${x.inconclusive.length} inconclusive: early-stop evidence was incomplete and could not decide a promotion; unresolved evaluators may retry with the next window's fresh batch`, "small warn")); }
-    else li.append(el("span", "none reported", "muted"));
+    if (x && k === "decision") { li.append(known(x.hotkey) ? id(x.hotkey) : el("span", "no king · burn", "muted"), el("span", `block ${int(x.block)}`, "small muted")); if (Array.isArray(x.inconclusive) && x.inconclusive.length) li.append(el("span", `${x.inconclusive.length} inconclusive: early-stop evidence was incomplete and could not decide a promotion; unresolved evaluators may retry with the next window's fresh batch`, "small warn")); }
+    else if (x) { li.append(el("span", vec(x), "mono")); if (k !== "intended") li.append(el("span", `block ${int(x.block)}`, "small muted")); if (k === "intended") li.append(tag(x.source)); if (k === "submitted") li.append(tag(x.status)); }
+    else li.append(el("span", k === "applied" ? "not observed on finalized chain" : "none reported", "muted"));
     ol.append(li);
   }
-  ws.append(ol); o.append(king, win, ws);
+  ws.append(ol, el("p", "Submitted is not applied: only the finalized chain vector counts. King from chain consensus only.", "small muted")); o.append(king, win, ws);
 }
+const stage = p => p ? `${p.stage ?? "unknown"} · ${Number.isFinite(p.completed_clips) && Number.isFinite(p.total_clips) ? `${p.completed_clips}/${p.total_clips} clips` : "clips unknown"}` : "unknown";
 function scoped() {
   const d = S.data, vs = d.validators || [];
-  table($("validators"), ["Hotkey", "Mode", "#Stake", "Freshness", "#Block", "#Commitment", "#Consumed", "#Reserved"],
-    vs.map(v => [id(v.hotkey), tag(v.mode), known(v.stake) ? v.stake.toLocaleString("en-US", {maximumFractionDigits: 2}) : "unknown", tag(v.freshness), int(v.block), known(v.commitment_block) ? int(v.commitment_block) : "none", int(v.used_count), int(v.reserved_count)]), "No validators reported.");
+  table($("validators"), ["Hotkey", "Mode", "#Stake", "Freshness", "#Block", "#Commitment", "Progress (telemetry)", "#Consumed", "#Reserved"],
+    vs.map(v => [id(v.hotkey), tag(v.mode), known(v.stake) ? v.stake.toLocaleString("en-US", {maximumFractionDigits: 2}) : "unknown", tag(v.freshness), int(v.block), known(v.commitment_block) ? int(v.commitment_block) : "none", stage(v.progress), int(v.used_count), int(v.reserved_count)]), "No validators reported.");
   const sel = $("validator"); sel.replaceChildren(...vs.map(v => { const o = el("option", `${short(String(v.hotkey))} · ${v.mode ?? "unknown"}`); o.value = v.hotkey; return o; }));
   if (!vs.length) sel.append(el("option", "no validators"));
   sel.disabled = !vs.length;

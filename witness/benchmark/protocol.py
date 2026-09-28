@@ -21,6 +21,7 @@ RESULT_PREFIX = "wr2|"
 MAX_COMMITMENT_BYTES = 128
 SCALE = 65535
 WINDOW_EPOCHS = 2
+BURN_FRACTION = .7
 CONTROLS_OK, REJECTED, BASELINE, EARLY_STOP = 1, 2, 4, 8
 _RESULT = struct.Struct(">IH32s12s32s4HB")
 
@@ -43,6 +44,35 @@ def quantize(value: float) -> int:
     if not math.isfinite(value) or not 0 <= value <= 1:
         raise ValueError("invalid_score")
     return int(math.floor(value * SCALE + .5))
+
+
+def weight_vector(king: dict | None, snapshot: dict) -> dict:
+    """One policy for replay, live submission and display; never guess a burn UID."""
+    burn = snapshot.get('burn_uid')
+    uid = snapshot['uids'].get(king['hotkey']) if king else None
+    king = king if uid is not None else None
+    allocations = {}
+    if burn is not None:
+        allocations[burn] = BURN_FRACTION if king else 1.
+        if king:
+            allocations[uid] = allocations.get(uid, 0.) + (1. - BURN_FRACTION)
+    pairs = sorted(allocations.items())
+    return {'king': king, 'uids': [u for u, _ in pairs], 'weights': [w for _, w in pairs],
+            'burn_uid': burn, 'king_uid': uid,
+            'burn_fraction': BURN_FRACTION if king else 1.,
+            'king_fraction': 1. - BURN_FRACTION if king else 0.,
+            'source': 'burn_unavailable' if burn is None else 'scores' if king else 'burn_no_king'}
+
+
+def weights_match(observed, vector: dict) -> bool:
+    """Compare normalized proportions, not SDK max-scaled raw u16 values."""
+    expected = dict(zip(vector['uids'], vector['weights']))
+    actual = dict(observed or [])
+    if not expected or set(actual) != set(expected) or len(actual) != len(observed or []):
+        return False
+    total, target = sum(actual.values()), sum(expected.values())
+    return total > 0 and target > 0 and all(
+        abs(actual[u] / total - w / target) <= 2 / SCALE for u, w in expected.items())
 
 
 @dataclass(frozen=True)
@@ -98,7 +128,8 @@ def policy_identity() -> str:
     here = Path(__file__).parent
     files = ("reward.py", "scoring.py", "contract.py", "adjudication.py", "judge.py", "annotate.py",
              "media.py", "pod_runtime.py", "pod_audio.py", "pod_setup.sh", "protocol.py", "ledger.py",
-             "submission.py", "triggers.py", "evaluator.py", "pool.py", "duel.py", "runner.py", "stopping.py")
+             "submission.py", "triggers.py", "evaluator.py", "pool.py", "duel.py", "runner.py", "stopping.py",
+             "execution.py")
     catalog = here / "data" / "catalogue-v2.json"
     hashes = {name: hashlib.sha256((here / name).read_bytes()).hexdigest() for name in files}
     hashes.update({str(p.relative_to(here)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -108,6 +139,7 @@ def policy_identity() -> str:
                          "window_epochs": WINDOW_EPOCHS, "videos": 5, "clips": 2, "references": 2,
                          "clip_timeout_s": 60,
                          "early_stop": "finite-batch-90-one-look-after-three",
+                         "burn_fraction": BURN_FRACTION,
                          "label_model": "gpt-6-luna", "judge_model": "gpt-5.6-terra",
                          "margin": .02, "controls_max": .05, "quality_floor": .05})
 
@@ -198,9 +230,7 @@ def decide(results: list[dict], *, window: int, policy: str, king: dict | None,
     winner = candidates[chosen] if chosen else king
     if winner and winner["hotkey"] not in snapshot["uids"]:
         winner = None
-    uid = snapshot["uids"].get(winner["hotkey"]) if winner else snapshot.get("burn_uid")
-    return {"window": window, "king": winner, "uids": [] if uid is None else [uid],
-            "weights": [] if uid is None else [1.], "source": "scores" if winner else "burn_no_king",
+    return {"window": window, **weight_vector(winner, snapshot),
             "inconclusive": sorted(inconclusive),
             "early_losses": early_losses,
             "aggregates": {m: {k: float(v) if isinstance(v, Fraction) else v for k, v in a.items()}

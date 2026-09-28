@@ -7,20 +7,23 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import signal
+import threading
 import time
 
 from witness.storage import write_private
 from .chain import Chain
 from .commitments import ChainCommitments
 from .ledger import Ledger
-from .protocol import policy_identity
+from .protocol import policy_identity, weight_vector, weights_match
 
 
 class Validator:
     def __init__(self, *, hotkey, root, chain, store, ledger, set_weights=None, evaluator=None,
-                 publication_store=None):
+                 publication_store=None, telemetry=None):
         self.hotkey, self.root, self.chain, self.store, self.ledger = hotkey, Path(root), chain, store, ledger
         self.set_weights, self.evaluator = set_weights, evaluator
+        self.telemetry = telemetry
         self.publication_store = publication_store or store
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='witness-chain-writer')
@@ -64,10 +67,11 @@ class Validator:
 
     def _due(self, vector, snapshot):
         state = self._load('weight-send.json', {})
-        if state.get('status') == 'unknown':
+        if state.get('status') in ('unknown', 'submitted'):
             # Reconcile observable finalization; an operator must resolve an ambiguous,
             # non-observable pending commit instead of potentially duplicating it.
-            if self.chain.applied_weights(self.hotkey, snapshot) == [(state['uids'][0], 65535)]:
+            if (weights_match(self.chain.applied_weights(self.hotkey, snapshot), state)
+                    and snapshot.get('last_update', {}).get(self.hotkey, snapshot['block']) >= state['block']):
                 write_private(self.root / 'weight-send.json', {**state, 'status': 'applied', 'block': snapshot['block']})
                 write_private(self.root / 'last-weights.json', {**state, 'block': snapshot['block']})
             return False
@@ -100,9 +104,7 @@ class Validator:
         king = decision.get('king')
         if king and king['hotkey'] not in snapshot['uids']:
             king = None
-        uid = snapshot['uids'].get(king['hotkey']) if king else snapshot.get('burn_uid')
-        vector = {'uids': [] if uid is None else [uid], 'weights': [] if uid is None else [1.],
-                  'king': king, 'source': 'scores' if king else 'burn_no_king'}
+        vector = weight_vector(king, snapshot)
         intent = {**vector, 'block': head, 'block_hash': snapshot['block_hash'], 'mode': self.mode,
                   'validator': self.hotkey, 'window': self.ledger.active, 'caught_up': caught_up,
                   'set_weights': self.set_weights is not None, 'decision': decision}
@@ -111,8 +113,9 @@ class Validator:
         if caught_up and self.future is None:
             if (self.set_weights is not None and vector['uids'] and self._due(vector, snapshot)
                     and self.hotkey in snapshot['permits']):
-                if snapshot.get('min_weights', 1) > 1 or snapshot.get('max_weight', 65535) < 65535:
-                    raise RuntimeError('chain_disallows_winner_take_all')
+                if (snapshot.get('min_weights', 1) > len(vector['uids'])
+                        or max(vector['weights']) > snapshot.get('max_weight', 65535) / 65535 + 1 / 65535):
+                    raise RuntimeError('chain_disallows_burn_allocation')
                 operation = {'kind': 'weights', 'block': head, 'uids': vector['uids'], 'weights': vector['weights'],
                              'hotkey': king['hotkey'] if king else None}
                 write_private(self.root / 'weight-send.json', {**operation, 'status': 'submitting'})
@@ -125,8 +128,9 @@ class Validator:
                     self.future = self.executor.submit(self.evaluator.flush_one, self.publication_store, snapshot)
         observed = self.chain.applied_weights(self.hotkey, snapshot) if self.hotkey in snapshot['uids'] else None
         intent['weights_applied'] = ({'hotkey': king['hotkey'] if king else None,
-                                      'block': snapshot.get('last_update', {}).get(self.hotkey)}
-                                     if uid is not None and observed == [(uid, 65535)] else None)
+                                      'block': snapshot.get('last_update', {}).get(self.hotkey),
+                                      'uids': vector['uids'], 'weights': vector['weights']}
+                                     if weights_match(observed, vector) else None)
         write_private(self.root / 'intended-weights.json', intent)
         self.publish_status(snapshot, intent)
         return intent
@@ -165,10 +169,17 @@ class Validator:
             'stake': snapshot['validators'].get(self.hotkey, 0) / 1e9, 'commitment_block': own_block,
             'window': window, 'king': intent['king'], 'triggers': triggers, 'evaluations': evaluations,
             'caught_up': intent['caught_up'],
-            'weights': {'decision': {'hotkey': (decision.get('king') or {}).get('hotkey'), 'block': decision['block'],
+            'progress': self._load('progress.json'),
+            'weights': {'intended': {k: intent[k] for k in ('uids', 'weights', 'source', 'burn_uid',
+                        'king_uid', 'burn_fraction', 'king_fraction')},
+                        'decision': {'hotkey': (decision.get('king') or {}).get('hotkey'), 'block': decision['block'],
                                      'inconclusive': decision.get('inconclusive', [])}
                          if decision else None, 'submitted': self._load('weight-send.json'),
                         'applied': intent['weights_applied']}})
+        write_private(self.root / 'telemetry-peers.json', {'self': self.hotkey, 'updated_unix': time.time(),
+                                                         'validators': snapshot['validators']})
+        if self.telemetry:
+            self.telemetry.submit(self._load('queue.json'))
 
     def close(self):
         if self.evaluator:
@@ -176,6 +187,8 @@ class Validator:
         # Keep the writer connection and process lock alive until its final receipt.
         self.executor.shutdown(wait=True, cancel_futures=True)
         self._complete_write()
+        if self.telemetry:
+            self.telemetry.close()
 
 
 def load_env(path):
@@ -185,6 +198,20 @@ def load_env(path):
         if '=' in line and not line.lstrip().startswith('#'):
             name, value = line.split('=', 1)
             os.environ.setdefault(name.strip(), value.strip().strip('"\''))
+
+
+def submit_weights(chain, wallet, netuid, uids, weights):
+    """Use the current chain-required version, not the SDK's default zero."""
+    substrate = chain.subtensor.substrate
+    head = substrate.get_chain_finalised_head()
+    version = int(substrate.query('SubtensorModule', 'WeightsVersionKey', [netuid], block_hash=head).value)
+    response = chain.subtensor.set_weights(wallet=wallet, netuid=netuid, uids=uids, weights=weights,
+                                          version_key=version, wait_for_inclusion=True, wait_for_finalization=True)
+    receipt = getattr(response, 'extrinsic_receipt', None)
+    return {'success': response.success is True, 'version_key': version,
+            'extrinsic_hash': getattr(receipt, 'extrinsic_hash', None),
+            'block_hash': getattr(receipt, 'block_hash', None),
+            'error': type(response.error).__name__ if response.error else None}
 
 
 def main():
@@ -207,8 +234,11 @@ def main():
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--status-port', type=int)
     parser.add_argument('--status-host', default='127.0.0.1')
+    parser.add_argument('--web-port', type=int, help='Serve the public web/API in this process (install ./web)')
+    parser.add_argument('--web-host', default='127.0.0.1')
+    parser.add_argument('--telemetry-url', help='Optional HTTPS /api/telemetry for signed display status')
     args = parser.parse_args()
-    if args.hotkey and (args.set_weights or args.publish_results or args.mode == 'evaluator'):
+    if args.hotkey and (args.set_weights or args.publish_results or args.mode == 'evaluator' or args.telemetry_url):
         parser.error('--hotkey is only for a read-only CPU follower; evaluator needs a signing hotkey for P2P')
     if args.mode == 'evaluator' and not args.config:
         parser.error('evaluator requires --config')
@@ -237,24 +267,37 @@ def main():
         publish_store = ChainCommitments(writer_chain.subtensor, args.netuid, wallet, writable=args.publish_results)
     if args.set_weights:
         def set_weights(uids, weights):
-            response = writer_chain.subtensor.set_weights(wallet=wallet, netuid=args.netuid, uids=uids, weights=weights,
-                                                          wait_for_inclusion=True, wait_for_finalization=True)
-            receipt = getattr(response, 'extrinsic_receipt', None)
-            return {'success': response.success is True, 'extrinsic_hash': getattr(receipt, 'extrinsic_hash', None),
-                    'block_hash': getattr(receipt, 'block_hash', None),
-                    'error': type(response.error).__name__ if response.error else None}
+            return submit_weights(writer_chain, wallet, args.netuid, uids, weights)
     evaluator = None
     if args.mode == 'evaluator':
         from .evaluator import Evaluator
         evaluator = Evaluator.from_config(json.loads(args.config.read_text()), root, hotkey, ledger, wallet.hotkey)
+    telemetry = None
+    if args.telemetry_url:
+        from .telemetry import TelemetrySender
+        telemetry = TelemetrySender(args.telemetry_url, wallet.hotkey)
     validator = Validator(hotkey=hotkey, root=root, chain=chain, store=store, ledger=ledger,
-                          evaluator=evaluator, set_weights=set_weights, publication_store=publish_store)
+                          evaluator=evaluator, set_weights=set_weights, publication_store=publish_store,
+                          telemetry=telemetry)
     server = None
     if args.status_port:
         from .dashboard import serve_status
         server = serve_status(root, args.status_host, args.status_port)
+    web, web_thread = None, None
+    if args.web_port:
+        import uvicorn
+        from witness_web.app import create_app
+        web = uvicorn.Server(uvicorn.Config(create_app(sources=[str(root)], telemetry_root=root),
+                              host=args.web_host, port=args.web_port, access_log=False))
+        web_thread = threading.Thread(target=web.run, name='witness-web', daemon=True)
+        web_thread.start()
+    stopped = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stopped.set())
     try:
-        while True:
+        while not stopped.is_set():
+            if web_thread and not web_thread.is_alive():
+                raise RuntimeError('web_server_stopped')
             try:
                 result = validator.step()
                 print(json.dumps({k: result[k] for k in ('block', 'mode', 'caught_up', 'uids', 'weights')}), flush=True)
@@ -263,15 +306,19 @@ def main():
                 print(json.dumps({'error': type(error).__name__}), flush=True)
             if args.once:
                 break
-            time.sleep(args.interval)
+            stopped.wait(args.interval)
     finally:
         validator.close()
         if server:
             server.shutdown()
+        if web:
+            web.should_exit = True
+            web_thread.join(timeout=15)
         chain.close()
         if writer_chain and validator.future is None:
             writer_chain.close()
         lock.close()
+        ledger.close()
 
 
 if __name__ == '__main__':

@@ -28,6 +28,7 @@ witness-benchmark-miner = "witness.benchmark.miner:main"
 witness-validator = "witness.benchmark.validator:main"
 witness-dashboard = "witness.benchmark.dashboard:main"
 witness-gpu-watchdog = "witness.benchmark.watchdog:main"
+witness-gpu-setup = "witness.benchmark.runner:setup_main"
 
 [tool.setuptools.packages.find]
 where = ["."]

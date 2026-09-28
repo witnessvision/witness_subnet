@@ -9,6 +9,7 @@ Sources, GPU audio evidence and labeling resume from private hashed artifacts.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 from pathlib import Path
 import secrets
@@ -21,9 +22,10 @@ from witness.budget import BudgetUnavailable
 from witness.events import content_hash
 from witness.storage import sha256_file, store_immutable, write_private
 from .annotate import label_clip
-from .archive import probe as source_duration, request
+from .archive import request
 from .contract import Policy
-from .media import PREPROCESSOR_ID, render_clip
+from .media import PREPROCESSOR_ID, render_clip, probe
+from .execution import run_process
 from .reward import EVAL, windows
 from .runner import audio_evidence
 
@@ -38,18 +40,19 @@ def _salt(root: Path) -> str:
     return json.loads(path.read_text())["salt"]
 
 
-def _cut(root: Path, video: dict, salt: str) -> list[dict]:
+def _cut(root: Path, video: dict, salt: str, *, cancelled=lambda: False, remaining_s=lambda: float('inf')) -> list[dict]:
     """Download one original, render its evaluation windows and delete it."""
     source = root / "src" / (video["identifier"] + ".mp4")
     rows = []
     try:
-        with httpx.Client(timeout=120, headers={"User-Agent": "WitnessValidator/1.0"}) as client:
+        run = partial(run_process, cancelled=cancelled, remaining_s=remaining_s)
+        with httpx.Client(timeout=max(.1, min(15., remaining_s())), headers={"User-Agent": "WitnessValidator/1.0"}) as client:
             request(client, f"https://archive.org/download/{quote(video['identifier'], safe='')}/{quote(video['file'])}",
-                    output=source, expected_size=video["size"])
-        length = source_duration(source)  # also rejects originals without audio and video
+                    output=source, expected_size=video["size"], cancelled=cancelled)
+        length = float(probe(source, run=run)['format']['duration'])
         for index, start, duration in windows(video["identifier"], length, salt):
             name = f"{video['identifier']}__{index:04d}.mp4"
-            digest = render_clip(source, root / "clips" / name, start=start, duration=duration)
+            digest = render_clip(source, root / "clips" / name, start=start, duration=duration, run=run)
             rows.append({"video": video["identifier"], "creator_group": video["creator_group"], "index": index,
                          "start": start, "file": name, "clip_sha256": digest, "duration": duration, "status": "ok"})
         if not rows:
@@ -66,6 +69,9 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None) -> dict:
     for name in ("src", "clips", "references", "evidence", "labeling"):
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
     videos = selected
+    cancelled = getattr(gpu, 'cancelled', lambda: False)
+    remaining_s = getattr(gpu, 'remaining_s', lambda: float('inf'))
+    run = partial(run_process, cancelled=cancelled, remaining_s=remaining_s)
     rows_path = root / "clips.jsonl"
     rows = [json.loads(line) for line in rows_path.read_text().splitlines()] if rows_path.exists() else []
     lock = threading.Lock()
@@ -79,7 +85,7 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None) -> dict:
     salt = salt or _salt(root)
 
     def cut(video):
-        result = _cut(root, video, salt)
+        result = _cut(root, video, salt, cancelled=cancelled, remaining_s=remaining_s)
         with lock, rows_path.open("a") as stream:
             for row in result:
                 stream.write(json.dumps(row) + "\n")
@@ -103,12 +109,12 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None) -> dict:
         row, labeling = job
         target = root / "references" / f"{row['clip_sha256']}.{labeling}.json"
         evidence_path = root / "evidence" / (row["file"] + ".json")
-        if exhausted.is_set() or target.exists() or not evidence_path.exists():
+        if cancelled() or exhausted.is_set() or target.exists() or not evidence_path.exists():
             return
         try:
             reference, receipt = label_clip(root / "clips" / row["file"], row["duration"],
                                             json.loads(evidence_path.read_text()), api,
-                                            root / "labeling" / f"{row['file']}.{labeling}", labeling=labeling)
+                                            root / "labeling" / f"{row['file']}.{labeling}", labeling=labeling, run=run)
         except BudgetUnavailable:
             exhausted.set()
             return

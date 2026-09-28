@@ -4,7 +4,9 @@ A follower replays finalized on-chain submissions and evaluation scores and
 computes the same single king as every validator using that protocol release.
 It does not need GPU, ffmpeg, API keys, model downloads or dashboard connectivity.
 An evaluator additionally runs a private GPU worker and publishes its measured
-scores. Both modes use the same consensus code and one-winner weight vector.
+scores. Both modes allocate 100% to the owner burn UID before the first king,
+then 70% to burn and 30% to the single king. A deregistered king returns the
+allocation to 100% burn. Applied weights are checked as normalized proportions.
 
 ## Activation and follower
 
@@ -44,6 +46,7 @@ configuration, stored privately outside the checkout:
 {
   "provider": "openai",
   "enabled_architectures": ["qwen2.5-omni"],
+  "api_daily_limit_usd": null,
   "gpu": {"backend": "local", "workspace": "/var/lib/witness-gpu"}
 }
 ```
@@ -52,6 +55,9 @@ Set `enabled_architectures` only after those loaders pass your real GPU qualific
 no architecture is enabled by default. An unenabled architecture defers without
 consuming the submission. The examples assume Qwen2.5-Omni has passed.
 
+### Optional remote backends
+
+These are alternatives, not requirements of the single-machine installation.
 An SSH backend uses `backend: ssh`, `host`, `port`, `ssh_key` and `workspace`.
 A RunPod backend uses an explicit compute budget:
 
@@ -82,8 +88,10 @@ before production use; existing host-key changes are rejected.
 Credentials go in a private `0600` env file: `OPENAI_API_KEY` for OpenAI or
 `GM_API_KEY` for `provider: saygm`, plus `RUNPOD_API_KEY` only for RunPod. Wallet
 secrets never belong there. Luna labeling and Terra judging are versioned policy,
-not per-validator tuning knobs. They have separate persistent budget ledgers,
-each capped at 9 USD per UTC day; this is a limit, not a cost estimate. RunPod's
+not per-validator tuning knobs. They share one persistent spending ledger. `api_daily_limit_usd: null` (the
+evaluator default) records consumption without a monetary cap. Set a non-negative
+USD amount to impose your own UTC daily cap. It never changes scoring. A saved
+budget policy cannot change silently; migrate it explicitly and preserve its ledger. RunPod's
 compute cap is additional; storage, network and provider settlement can add costs.
 
 ```bash
@@ -99,6 +107,41 @@ A signing hotkey is needed for authenticated miner downloads. The miner's defaul
 100,000-alpha gate can prevent lower-stake evaluators from downloading; those
 validators can still follow scores and set weights. Add `--publish-results` and
 `--set-weights` only when those writes are authorized and activation checks pass.
+
+## One GPU machine, one startup command
+
+Install the subnet and web packages on a CUDA machine with the runtime image's
+pinned base dependencies. Prepare the GPU environments once, before activation:
+
+```bash
+.venv/bin/python -m pip install -e '.[evaluator]' -e ./web
+.venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
+.venv/bin/witness-validator --mode evaluator \
+  --activation-block BLOCK --activation-epoch EPOCH \
+  --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
+  --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
+  --publish-results --set-weights --web-host 0.0.0.0 --web-port 8080
+```
+
+Use the local GPU configuration above. This process serves the web/API and runs
+chain tracking and evaluation independently. Model and media subprocesses remain
+isolated and cancellable. It never rents or stops a GPU and needs no RunPod key,
+SSH worker or separate GPU service. Process supervision for reboot recovery is
+optional. Put persistent state and encrypted wallet files on durable storage;
+never rely on a cloud container's ephemeral disk. Serve the web port over HTTPS.
+
+Other GPU jobs must acquire the same `/var/lib/witness-gpu/gpu.lock` with `flock`.
+The evaluator acquires that lock for the whole paired attempt and checks for
+existing GPU processes. If occupied it defers without a miner penalty. This is
+cooperative scheduling: do not launch an uncoordinated GPU workload during a duel.
+The validator never terminates another operator's job.
+
+The 900-second attempt budget starts before shared preparation and downloads;
+completed clips, labels and grades are cached for retries. Local media/inference
+processes are cancelled at expiry or epoch change, with a five-second kill
+backstop; network requests can take their bounded timeout to unwind. GPU setup
+is an installation step, not part of a production duel. A 60-second model answer
+limit is distinct from model loading, labeling and judging time.
 
 ## Continuous queue and recovery
 
@@ -119,7 +162,7 @@ validators can still follow scores and set weights. Add `--publish-results` and
   budget ledgers and pending extrinsic records together. Restoring only a queue
   or deleting a budget file changes the meaning of the state.
 
-## Independent RunPod watchdog
+## Optional RunPod backend watchdog
 
 Run the watchdog as a **separate supervised process**, with the same root,
 configuration and private env. It never starts or deletes compute. Without
@@ -155,6 +198,14 @@ behind the operator's chosen HTTPS proxy. Multiple sources may be displayed:
 The first configured source supplies the chain decision shown on the page.
 If unavailable, that decision is unknown; the dashboard never elects a majority
 king. Additional sources contribute their own queues and evaluation detail.
+The same-process web/API accepts optional signed peer status at `POST /api/telemetry`.
+Other validators opt in with `--telemetry-url https://DASHBOARD/api/telemetry`;
+messages bind the hotkey signature to the public status, reject stale/replayed
+updates, and require current permitted-validator membership. Remote telemetry
+never supplies consensus decisions, and peer report links stay unavailable until
+a configured report source can verify them. Local closed reports and clips remain
+served by the existing routes. No wallet keys or private labels are sent.
+
 The separate web application accepts `WITNESS_VALIDATOR_SOURCES` as a JSON array.
 
 The API exposes `/api/subnet`, paginated/searchable `/api/hotkeys`, and closed

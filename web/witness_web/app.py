@@ -10,9 +10,9 @@ STATIC = Path(__file__).parent / "static"
 DOCS = Path(__file__).resolve().parents[2] / "docs"
 
 
-def create_app(*, sources=None) -> FastAPI:
+def create_app(*, sources=None, telemetry_root=None) -> FastAPI:
     app = FastAPI(title="Witness subnet", docs_url=None, redoc_url=None, openapi_url=None)
-    add_subnet_routes(app, sources)
+    add_subnet_routes(app, sources, telemetry_root=telemetry_root)
 
     @app.middleware("http")
     async def headers(request, call_next):

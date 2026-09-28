@@ -15,7 +15,12 @@
   const decimal = (n, digits = 3) => known(n) && Number.isFinite(n) ? n.toFixed(digits) : "—";
   const stake = (n) => known(n) && Number.isFinite(n) ? new Intl.NumberFormat("en-US", {maximumFractionDigits: 2}).format(n) : "Unknown";
   const short = (s) => s.length > 18 ? `${s.slice(0, 8)}…${s.slice(-6)}` : s;
-  const time = () => new Date().toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  const finite = (n) => typeof n === "number" && Number.isFinite(n);
+  const list = (v) => Array.isArray(v) ? v : [];
+  const pct = (f) => finite(f) ? `${Math.round(f * 1000) / 10}%` : "?";
+  const clock = (ms) => new Date(ms).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  const age = (s) => s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h`;
+  const unknown = (text = "Unknown") => el("span", text, "sn-unknown");
 
   async function read(path) {
     const response = await fetch(path, {cache: "no-store", headers: {Accept: "application/json"}, signal: AbortSignal.timeout(15000)});
@@ -66,6 +71,61 @@
     const key = text.toLowerCase();
     const tone = Object.keys(TONES).find((t) => TONES[t].includes(key)) || "neutral";
     return el("span", text, `sn-badge sn-${tone}`);
+  }
+
+  // Relative age that keeps ticking; `unix` is seconds. Older than the backend's 120 s freshness window reads as old.
+  function since(unix, prefix = "") {
+    if (!finite(unix)) return unknown(`${prefix}time unknown`);
+    const span = el("span", null, "sn-since");
+    span.dataset.since = String(unix);
+    span.dataset.prefix = prefix;
+    tick(span);
+    return span;
+  }
+  function tick(span) {
+    const s = Math.max(0, Math.round(Date.now() / 1000 - Number(span.dataset.since)));
+    span.textContent = `${span.dataset.prefix}${age(s)} ago`;
+    span.classList.toggle("sn-old", s > 120);
+  }
+
+  // Evaluator telemetry stages. Anything else is shown verbatim, never guessed.
+  const STAGES = {
+    waiting: ["Waiting", "sn-neutral"], preparing: ["Preparing batch", "sn-live"], downloading: ["Downloading weights", "sn-live"],
+    evaluating: ["Running clips", "sn-live"], judging: ["Scoring claims", "sn-live"], deferred: ["Deferred", "sn-warn"],
+  };
+  function stageBadge(stage) {
+    if (!known(stage) || stage === "") return unknown();
+    const [label, tone] = STAGES[stage] || [String(stage), "sn-neutral"];
+    const node = el("span", label, `sn-badge ${tone}`);
+    if (stage === "deferred") node.title = "Infrastructure deferral: retried later, never scored as zero";
+    return node;
+  }
+
+  function clipProgress(done, total) {
+    if (!finite(done) || !finite(total) || total <= 0) return unknown("Clip progress unknown");
+    const box = el("div", null, "sn-progress");
+    const bar = el("progress", null, "sn-bar");
+    bar.max = total;
+    bar.value = Math.min(done, total);
+    bar.setAttribute("aria-label", `${done} of ${total} clips completed`);
+    box.append(bar, el("span", `${integer(done)} of ${integer(total)} clips`));
+    return box;
+  }
+
+  // Weight vectors are shown as published: UIDs with normalized shares.
+  function vector(uids, weights) {
+    if (!Array.isArray(uids)) return unknown("Vector not reported");
+    if (!uids.length) return unknown("Empty vector");
+    const box = el("span", null, "sn-vector");
+    uids.forEach((uid, i) => box.append(el("span", `UID ${uid} · ${pct(Array.isArray(weights) ? weights[i] : null)}`, "sn-chip")));
+    return box;
+  }
+  function sameVector(a, b) {
+    if (!Array.isArray(a?.uids) || !Array.isArray(b?.uids) || a.uids.length !== b.uids.length) return false;
+    return a.uids.every((uid, i) => {
+      const j = b.uids.indexOf(uid);
+      return j >= 0 && finite(a.weights?.[i]) && finite(b.weights?.[j]) && Math.abs(a.weights[i] - b.weights[j]) <= 0.005;
+    });
   }
 
   // An early stop publishes upper bounds, never a measured score or a win.
@@ -140,7 +200,7 @@
     return dl;
   }
 
-  const state = {data: null, validator: null, hotkeys: {state: "consumed", q: "", page: 1, seq: 0}, loading: false};
+  const state = {data: null, validator: null, hotkeys: {state: "consumed", q: "", page: 1, seq: 0}, loading: false, fetchedAt: null, failed: false};
 
   // ---------- Overview ----------
   function renderChain(data) {
@@ -153,10 +213,35 @@
       row.append(el("dt", label), dd);
       meta.append(row);
     };
-    add("Block", known(data.block) ? integer(data.block) : "Unknown");
-    add("Policy", known(data.policy_hash) ? ident(data.policy_hash, "policy hash") : el("span", "Unknown", "sn-unknown"));
+    add("Block", known(data.block) ? integer(data.block) : unknown());
+    const w = data.window;
+    add("Window", w ? `${w.id ?? "?"} · ${w.state ?? "unknown"}` : unknown());
+    const validators = list(data.validators);
+    const fresh = validators.filter((v) => v.freshness === "fresh").length;
+    add("Fresh", validators.length ? el("span", `${fresh} of ${validators.length} reporting`, fresh === validators.length ? "sn-ok" : "sn-warn") : unknown("None reporting"));
+    add("Policy", known(data.policy_hash) ? ident(data.policy_hash, "policy hash") : unknown());
     $("#demo-banner").hidden = data.is_demo !== true;
     document.body.classList.toggle("sn-is-demo", data.is_demo === true);
+  }
+
+  function renderUpdated() {
+    const target = $("#updated");
+    if (!state.fetchedAt) { target.textContent = state.failed ? "Read failed" : "Reading…"; return; }
+    const s = Math.max(0, Math.round((Date.now() - state.fetchedAt) / 1000));
+    target.textContent = `${state.failed ? "Refresh failed · last read" : "Read"} ${age(s)} ago`;
+    target.classList.toggle("sn-warn", state.failed);
+  }
+
+  // Stale means the page may not show the present chain state; say why instead of hiding the data.
+  function renderStale() {
+    const reasons = [];
+    const data = state.data;
+    if (data && state.failed) reasons.push(`The latest refresh failed; showing the read from ${clock(state.fetchedAt)}.`);
+    if (data && !known(data.block)) reasons.push("The authoritative chain source is unavailable, so block, king and weights are unknown.");
+    const validators = list(data?.validators);
+    if (validators.length && !validators.some((v) => v.freshness === "fresh")) reasons.push("No reporting validator shows a caught-up chain view from the last 2 minutes.");
+    $("#stale-banner").hidden = !reasons.length;
+    $("#stale-text").textContent = reasons.join(" ");
   }
 
   function renderErrors(errors) {
@@ -175,8 +260,8 @@
     target.append(box);
   }
 
-  function card(eyebrow, title, body, extra) {
-    const article = el("article", null, "sn-card");
+  function card(eyebrow, title, body, extra, cls = "") {
+    const article = el("article", null, `sn-card ${cls}`.trim());
     const head = el("div", null, "sn-card-head");
     head.append(el("p", eyebrow, "sn-eyebrow"));
     if (extra) head.append(extra);
@@ -186,13 +271,133 @@
     return article;
   }
 
+  function splitBar(intended) {
+    const burn = intended?.burn_fraction;
+    const share = intended?.king_fraction;
+    if (!finite(burn) || !finite(share)) return el("p", "Intended burn and king split not reported.", "sn-unknown");
+    const box = el("div", null, "sn-split-wrap");
+    const bar = el("div", null, "sn-split");
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", `Intended weights: ${pct(burn)} burned, ${pct(share)} to the king`);
+    for (const [fraction, cls] of [[burn, "sn-split-burn"], [share, "sn-split-king"]]) {
+      if (fraction <= 0) continue;
+      const part = el("span", null, cls);
+      part.style.flexGrow = String(fraction);
+      bar.append(part);
+    }
+    const legend = el("div", null, "sn-split-legend");
+    for (const [label, fraction, uid, cls, none] of [["burn", burn, intended.burn_uid, "sn-split-burn", "burn UID unknown"], ["king", share, intended.king_uid, "sn-split-king", "no king"]]) {
+      const item = el("span");
+      item.append(el("i", null, `sn-key ${cls}`), el("strong", pct(fraction)), el("span", ` ${label} · ${known(uid) ? `UID ${uid}` : none}`));
+      legend.append(item);
+    }
+    box.append(bar, legend);
+    return box;
+  }
+
+  function renderCrown(king, intended, authority) {
+    const title = el("div", null, "sn-card-title");
+    const body = [];
+    if (!authority && !king) {
+      // Without the authoritative chain projection, "no king" would be a guess.
+      title.append(unknown("King unknown"));
+      body.push(el("p", "The authoritative chain source is unavailable. King, burn and weights stay unknown until it answers.", "sn-lede"));
+      return card("KING", title, body, el("span", "Unknown", "sn-badge sn-neutral"), "sn-crown");
+    }
+    if (king) {
+      title.append(ident(king.hotkey, "king hotkey"));
+      body.push(facts([["Coldkey", ident(king.coldkey, "king coldkey")], ["Model", ident(king.model_id, "king model id")], ["UID", known(intended?.king_uid) ? String(intended.king_uid) : unknown()]]));
+    } else {
+      title.append(el("span", "No king yet"));
+      const burn = finite(intended?.burn_fraction) ? `${pct(intended.burn_fraction)} of the weight burns` : "Weight burns";
+      const uid = known(intended?.burn_uid) ? `UID ${intended.burn_uid}` : "the burn UID";
+      body.push(el("p", `${burn} to ${uid} until the chain crowns a first king. The first king comes from a bootstrap pair, so the subnet waits for two valid submissions evaluated on the same batch.`, "sn-lede"));
+    }
+    body.push(el("p", "WEIGHT SPLIT · INTENDED", "sn-eyebrow sn-sub-eyebrow"), splitBar(intended));
+    body.push(el("p", "The king is read from finalized chain consensus only. With a king, 30% goes to the king and 70% burns; without one, 100% burns.", "sn-note"));
+    const status = king ? el("span", "Crowned", "sn-badge sn-good") : el("span", "No king · burning", "sn-badge sn-warn");
+    return card("KING", title, body, status, "sn-crown");
+  }
+
+  function renderWeights(weights) {
+    const {decision, intended, submitted, applied} = weights;
+    const steps = el("ol", null, "sn-steps");
+    const step = (label, item, hint, fill, extra) => {
+      const li = el("li", null, item ? "" : "sn-step-missing");
+      const top = el("div", null, "sn-step-top");
+      top.append(el("strong", label));
+      if (extra) top.append(...extra.filter(Boolean));
+      li.append(top);
+      if (item) fill(li); else li.append(unknown(label === "Applied" ? "Not observed on finalized chain" : "None reported"));
+      li.append(el("small", hint, "sn-step-hint"));
+      steps.append(li);
+    };
+    step("Decision", decision, "Winner computed from finalized commitments", (li) => {
+      li.append(known(decision.hotkey) ? ident(decision.hotkey, "decision hotkey") : el("span", "No king · burn", "sn-strong"), el("small", `Block ${integer(decision.block)}`));
+      const open = list(decision.inconclusive).length;
+      if (open) li.append(el("small", `${open} inconclusive: early-stop evidence was incomplete and could not decide a promotion; unresolved evaluators may retry with the next window's fresh batch`, "sn-warn"));
+    });
+    step("Intended", intended, "Vector this validator intends to set", (li) => li.append(vector(intended.uids, intended.weights)),
+      [intended ? badge(intended.source) : null]);
+    step("Submitted", submitted, "set_weights extrinsic sent; not proof that weights applied", (li) => {
+      if (Array.isArray(submitted.uids)) li.append(vector(submitted.uids, submitted.weights));
+      li.append(el("small", `Block ${integer(submitted.block)}`));
+      if (known(submitted.receipt)) li.append(responseBlock("Receipt", submitted.receipt));
+    }, [submitted ? badge(submitted.status) : null,
+      submitted && intended && Array.isArray(submitted.uids) && !sameVector(submitted, intended) ? el("span", "differs from intended", "sn-badge sn-warn") : null]);
+    step("Applied", applied, "Observed in finalized chain state; commit/reveal can delay it after submission", (li) => {
+      if (known(applied.hotkey)) li.append(ident(applied.hotkey, "applied king hotkey"));
+      li.append(vector(applied.uids, applied.weights), el("small", `Block ${integer(applied.block)}`));
+    }, [applied && intended ? (sameVector(applied, intended) ? el("span", "matches intended", "sn-badge sn-good") : el("span", "differs from intended", "sn-badge sn-warn")) : null]);
+    return card("WEIGHTS · DECISION → APPLIED", null, [steps], null, "sn-card-wide");
+  }
+
+  function modelRole(modelId, king) {
+    if (!known(modelId)) return "No model";
+    if (king && king.model_id === modelId) return "King baseline";
+    return king ? "Challenger" : "Bootstrap candidate";
+  }
+
+  function liveTile(v, data) {
+    const p = v.progress;
+    const tile = el("div", null, "sn-live-tile");
+    const top = el("div", null, "sn-live-top");
+    top.append(ident(v.hotkey, "validator hotkey"), badge(v.freshness));
+    tile.append(top);
+    const queue = data.queues ? data.queues[v.hotkey] : undefined;
+    const queueText = Array.isArray(queue) ? `${integer(queue.length)} in queue` : "Queue unknown";
+    if (!p) {
+      tile.append(el("div", null, "sn-live-stage"));
+      tile.lastChild.append(unknown("No progress reported"));
+      tile.append(el("p", "State unknown until this validator publishes telemetry.", "sn-muted sn-small"));
+    } else {
+      const stage = el("div", null, "sn-live-stage");
+      stage.append(stageBadge(p.stage), el("span", known(p.window_id) ? `Window ${p.window_id}` : "Window unknown", "sn-muted"));
+      const model = el("div", null, "sn-live-model");
+      model.append(el("span", modelRole(p.model_id, data.king), "sn-role"));
+      if (known(p.model_id)) model.append(ident(p.model_id, "model id"));
+      tile.append(stage, model, clipProgress(p.completed_clips, p.total_clips));
+    }
+    const foot = el("div", null, "sn-live-foot");
+    foot.append(p ? since(p.updated_unix, "Updated ") : el("span", v.mode ?? "unknown mode"), el("span", queueText));
+    tile.append(foot);
+    return tile;
+  }
+
+  function renderLive(data) {
+    const validators = list(data.validators).filter((v) => v.mode === "evaluator" || known(v.progress));
+    const grid = el("div", null, "sn-live-grid");
+    if (!validators.length) grid.append(empty("No evaluator telemetry", "No validator publishes progress to this dashboard. Telemetry is opt-in, so this says nothing about evaluations or commitments on chain."));
+    for (const v of validators) grid.append(liveTile(v, data));
+    const note = el("p", "Signed validator telemetry, shown for display only. It never decides the king or the weights. Open-window clips stay hidden until the window closes.", "sn-note");
+    return card("EVALUATION NOW · TELEMETRY", null, [grid, note], null, "sn-card-wide");
+  }
+
   function renderOverview(data) {
     const target = $("#overview-body");
     target.replaceChildren();
-    const king = data.king;
-    const kingTitle = el("div", null, "sn-card-title");
-    kingTitle.append(king ? ident(king.hotkey, "king hotkey") : el("span", "No king reported", "sn-unknown"));
-    target.append(card("KING", kingTitle, king ? [facts([["Coldkey", ident(king.coldkey, "king coldkey")], ["Model", ident(king.model_id, "king model id")]])] : [el("p", "The chain has no current king.", "sn-note")]));
+    const weights = data.weights || {};
+    target.append(renderCrown(data.king, weights.intended, known(data.block)));
 
     const w = data.window;
     const windowTitle = el("div", null, "sn-card-title");
@@ -204,38 +409,26 @@
     ])] : [el("p", "No evaluation window is reported.", "sn-note")];
     if (w && w.state === "open") windowBody.push(el("p", "Clip detail for this window is hidden until it closes.", "sn-note"));
     target.append(card("WINDOW · 2 EPOCHS", windowTitle, windowBody, w ? badge(w.state) : null));
-
-    const weights = data.weights || {};
-    const decisionKey = weights.decision?.hotkey;
-    const steps = el("ol", null, "sn-steps");
-    for (const [key, label, hint] of [["decision", "Decision", "Winner computed from finalized commitments"], ["submitted", "Submitted", "set_weights extrinsic sent"], ["applied", "Applied", "Weights visible on chain"]]) {
-      const item = weights[key];
-      const li = el("li", null, item ? "" : "sn-step-missing");
-      const top = el("div", null, "sn-step-top");
-      top.append(el("strong", label));
-      if (key === "submitted" && item) top.append(badge(item.status));
-      if (item && key !== "decision" && known(decisionKey) && item.hotkey !== decisionKey) top.append(el("span", "differs from decision", "sn-badge sn-warn"));
-      li.append(top);
-      if (item) {
-        li.append(ident(item.hotkey, `${label.toLowerCase()} hotkey`), el("small", `Block ${integer(item.block)}`));
-      } else {
-        li.append(el("span", "None reported", "sn-unknown"));
-      }
-      const open = key === "decision" && Array.isArray(item?.inconclusive) ? item.inconclusive.length : 0;
-      if (open) li.append(el("small", `${open} inconclusive: early-stop evidence was incomplete and could not decide a promotion; unresolved evaluators may retry with the next window's fresh batch`, "sn-warn"));
-      li.append(el("small", hint, "sn-step-hint"));
-      steps.append(li);
-    }
-    target.append(card("WEIGHTS", null, [steps]));
+    target.append(renderWeights(weights), renderLive(data));
     target.setAttribute("aria-busy", "false");
   }
 
   // ---------- Validators ----------
+  function progressCell(p) {
+    if (!p) return unknown();
+    const box = el("span", null, "sn-stack");
+    const top = el("span", null, "sn-inline");
+    top.append(stageBadge(p.stage));
+    if (finite(p.completed_clips) && finite(p.total_clips)) top.append(el("small", `${p.completed_clips}/${p.total_clips} clips`, "sn-muted"));
+    box.append(top, since(p.updated_unix));
+    return box;
+  }
+
   function renderValidators(data) {
     const target = $("#validators-body");
     const validators = Array.isArray(data.validators) ? data.validators : [];
     if (!validators.length) {
-      target.replaceChildren(empty("No validators reported", "No validator commitments are visible on chain."));
+      target.replaceChildren(empty("No validator reporting", "No validator publishes its status to this dashboard. Reporting is opt-in: registered validators may still hold chain commitments that are not listed here."));
       return;
     }
     const rows = validators.map((v) => {
@@ -243,9 +436,9 @@
       select.type = "button";
       select.setAttribute("aria-pressed", String(v.hotkey === state.validator));
       select.onclick = () => { selectValidator(v.hotkey); $("#queue").scrollIntoView({block: "start"}); };
-      return [ident(v.hotkey, "validator hotkey"), badge(v.mode), stake(v.stake), badge(v.freshness), integer(v.block), known(v.commitment_block) ? integer(v.commitment_block) : el("span", "None", "sn-unknown"), integer(v.used_count), integer(v.reserved_count), select];
+      return [ident(v.hotkey, "validator hotkey"), badge(v.mode), stake(v.stake), badge(v.freshness), integer(v.block), known(v.commitment_block) ? integer(v.commitment_block) : el("span", "None", "sn-unknown"), progressCell(v.progress), integer(v.used_count), integer(v.reserved_count), select];
     });
-    target.replaceChildren(table("Validators", [["Hotkey"], ["Mode"], ["Stake", "sn-num"], ["Freshness"], ["Last block", "sn-num"], ["Commitment block", "sn-num"], ["Consumed", "sn-num"], ["Reserved", "sn-num"], ["", "sn-action"]], rows,
+    target.replaceChildren(table("Validators", [["Hotkey"], ["Mode"], ["Stake", "sn-num"], ["Freshness"], ["Last block", "sn-num"], ["Commitment block", "sn-num"], ["Progress"], ["Consumed", "sn-num"], ["Reserved", "sn-num"], ["", "sn-action"]], rows,
       (i) => validators[i].hotkey === state.validator ? "sn-selected" : ""));
   }
 
@@ -258,7 +451,7 @@
       option.value = v.hotkey;
       select.append(option);
     }
-    if (!validators.length) select.append(el("option", "No validators"));
+    if (!validators.length) select.append(el("option", "None reporting"));
     select.disabled = !validators.length;
     if (state.validator) select.value = state.validator;
     const scope = $("#scope-id");
@@ -469,16 +662,61 @@
     return t;
   }
 
+  // Claims are the model's timestamped answer (clip-local seconds). Each time seeks the clip player.
+  const MODALITIES = ["visual", "speech", "text", "sound"];
+  function claimRow(claim, video) {
+    const li = el("li");
+    const start = finite(claim?.start) ? claim.start : null;
+    const end = finite(claim?.end) ? claim.end : null;
+    if (start != null && end != null) Object.assign(li.dataset, {start: String(start), end: String(end)});
+    const time = el("button", start != null && end != null ? `${start.toFixed(1)}–${end.toFixed(1)} s` : "Time ?", "sn-claim-time");
+    time.type = "button";
+    if (video && start != null) {
+      time.setAttribute("aria-label", `Play the clip from ${start.toFixed(1)} seconds`);
+      time.onclick = () => { video.currentTime = start; video.play().catch(() => {}); };
+    } else {
+      time.disabled = true;
+    }
+    const modality = String(claim?.modality ?? "unknown");
+    const chip = el("span", modality, MODALITIES.includes(modality) ? `sn-mod sn-mod-${modality}` : "sn-mod");
+    const text = el("div", null, "sn-claim-text");
+    text.append(el("strong", String(claim?.subject ?? "—")), el("span", String(claim?.description ?? "")));
+    li.append(time, chip, text);
+    return li;
+  }
+
+  function claimsBlock(label, response, video, open) {
+    const details = el("details", null, "sn-response");
+    details.open = open;
+    const claims = response && typeof response === "object" && Array.isArray(response.claims) ? response.claims : null;
+    details.append(el("summary", claims ? `${label} · ${claims.length} claim${claims.length === 1 ? "" : "s"}` : label));
+    if (claims && claims.length) {
+      const ol = el("ol", null, "sn-claims");
+      for (const claim of claims) ol.append(claimRow(claim, video));
+      details.append(ol);
+    } else if (claims) {
+      details.append(el("p", "The model returned no claims.", "sn-muted"));
+    } else if (known(response)) {
+      details.append(el("p", "Not a valid claim list; shown exactly as returned.", "sn-muted"), el("pre", typeof response === "string" ? response : JSON.stringify(response, null, 2)));
+    } else {
+      details.append(el("p", "No response recorded.", "sn-muted"));
+    }
+    return details;
+  }
+
   function clipCard(clip) {
     const article = el("article", null, "sn-clip");
     const head = el("div", null, "sn-clip-head");
-    const range = known(clip.start) && known(clip.duration) ? `source ${decimal(clip.start, 1)} s → ${decimal(clip.start + clip.duration, 1)} s` : "Source range unknown";
-    head.append(el("strong", `Clip ${clip.id ?? "?"}`), el("span", range, "sn-muted"));
+    const range = known(clip.start) && known(clip.duration) ? `source ${decimal(clip.start, 1)} s → ${decimal(clip.start + clip.duration, 1)} s · ${decimal(clip.duration, 1)} s clip` : "Source range unknown";
+    const name = el("strong", "Clip ");
+    name.append(el("code", short(String(clip.id ?? "?"))));
+    head.append(name, el("span", range, "sn-muted"));
     article.append(head);
     const body = el("div", null, "sn-clip-body");
     const media = el("div", null, "sn-clip-media");
+    let video = null;
     if (known(clip.video_url) && sameOrigin(clip.video_url)) {
-      const video = el("video");
+      video = el("video");
       video.controls = true;
       video.preload = "metadata";
       video.muted = true;
@@ -486,6 +724,11 @@
       // video_url already serves the cut clip; start/duration describe the source and are informational only.
       video.src = new URL(clip.video_url, location.href).href;
       video.setAttribute("aria-label", `Clip ${clip.id ?? ""} video`);
+      // Mark the claims (challenger and king) whose interval covers the playhead.
+      video.addEventListener("timeupdate", () => {
+        const t = video.currentTime;
+        for (const li of article.querySelectorAll(".sn-claims li[data-start]")) li.classList.toggle("sn-claim-now", t >= Number(li.dataset.start) && t < Number(li.dataset.end));
+      });
       media.append(video);
     } else {
       media.append(el("p", "Clip media not available.", "sn-muted"));
@@ -498,8 +741,8 @@
       ["Time score", decimal(clip.time_score), decimal(k?.time_score)],
       ["Reward", decimal(clip.reward), decimal(k?.reward)],
     ], Boolean(k)));
-    stats.append(responseBlock("Challenger response", clip.response));
-    if (k) stats.append(responseBlock("King response", k.response));
+    stats.append(claimsBlock("Challenger claims", clip.response, video, true));
+    if (k) stats.append(claimsBlock("King claims", k.response, video, false));
     body.append(media, stats);
     article.append(body);
     return article;
@@ -550,10 +793,11 @@
     }
     parts.push(totals(early ? "TOTAL · UPPER BOUND" : "TOTAL", t.quality, t.reward, t.king_quality, t.king_reward, hasKing,
       early ? {quality: t.quality_upper ?? detail.early_stop?.quality_upper, reward: t.reward_upper ?? detail.early_stop?.reward_upper} : null));
-    const meta = el("p", null, "sn-note");
-    meta.append(el("span", "Report "), known(detail.report_hash) ? ident(detail.report_hash, "report hash") : el("span", "hash missing", "sn-unknown"), el("span", " · reward = quality × (0.8 + 0.2 × time_score), computed by the evaluator."));
-    parts.push(meta);
     const videos = Array.isArray(detail.videos) ? detail.videos : [];
+    const clipCount = videos.reduce((n, video) => n + list(video.clips).length, 0);
+    const meta = el("p", null, "sn-note");
+    meta.append(el("span", `${videos.length} video${videos.length === 1 ? "" : "s"} · ${clipCount} clip${clipCount === 1 ? "" : "s"} in this report · Report `), known(detail.report_hash) ? ident(detail.report_hash, "report hash") : el("span", "hash missing", "sn-unknown"), el("span", " · reward = quality × (0.8 + 0.2 × time_score), computed by the evaluator. Claim times play the clip from that moment."));
+    parts.push(meta);
     if (!videos.length) parts.push(empty("No clips in report", "The report lists no sampled videos."));
     for (const video of videos) {
       const section = el("section", null, "sn-video");
@@ -616,15 +860,16 @@
       if (data.schema_version !== "witness-dashboard-2") throw new Error("schema");
       const previous = state.validator;
       state.data = data;
+      state.fetchedAt = Date.now();
+      state.failed = false;
       state.validator = defaultValidator(Array.isArray(data.validators) ? data.validators : []);
       renderChain(data);
       renderErrors(data.errors);
       renderOverview(data);
       renderScoped();
       if (previous !== state.validator || !$("#hotkeys-body .sn-table, #hotkeys-body .sn-empty")) loadHotkeys();
-      $("#updated").textContent = `Fetched ${time()}`;
     } catch {
-      $("#updated").textContent = "Last fetch failed";
+      state.failed = true;
       if (!state.data) {
         for (const id of ["#validators-body", "#queue-body", "#hotkeys-body", "#evaluations-body"]) $(id).replaceChildren(el("p", "Unavailable until the subnet state loads.", "sn-loading"));
         const select = $("#validator-select");
@@ -635,8 +880,14 @@
     } finally {
       state.loading = false;
       button.disabled = false;
+      renderUpdated();
+      renderStale();
     }
   }
+
+  // The sticky validator bar sits under the sticky topbar, whose height grows when chain facts wrap.
+  const topbar = $(".sn-topbar");
+  new ResizeObserver(() => document.documentElement.style.setProperty("--topbar-h", `${topbar.offsetHeight}px`)).observe(topbar);
 
   $("#refresh").onclick = load;
   $("#validator-select").onchange = (event) => selectValidator(event.target.value);
@@ -645,4 +896,9 @@
   load();
   // Finalized state changes at block cadence; refresh quietly while the tab is visible.
   setInterval(() => { if (!document.hidden && !$("#detail").open) load(); }, 60000);
+  setInterval(() => {
+    if (document.hidden) return;
+    for (const span of document.querySelectorAll("[data-since]")) tick(span);
+    renderUpdated();
+  }, 1000);
 })();

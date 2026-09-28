@@ -16,11 +16,12 @@ evaluator configuration under ``"gpu": {"backend": ...}``:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager, nullcontext
+import fcntl
 import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 import time
 
@@ -58,20 +59,59 @@ class Gpu:
     def discard(self) -> None:
         pass
 
+    def lease(self):
+        return nullcontext()
+
 
 class LocalGpu(Gpu):
     def __init__(self, config: dict, root: Path):
         super().__init__(config, root)
         self.workspace = str(Path(config.get("workspace", root / "gpu")).resolve())
         Path(self.workspace).mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.cancelled = lambda: False
+        self.remaining_s = lambda: float('inf')
+
+    @contextmanager
+    def lease(self):
+        """Other local GPU jobs must share this lock; never kill their processes."""
+        with (Path(self.workspace) / 'gpu.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise InfrastructureError('gpu_busy') from error
+            probe = subprocess.run(['nvidia-smi', '--query-compute-apps=pid', '--format=csv,noheader,nounits'],
+                                   capture_output=True, text=True, timeout=10)
+            if probe.returncode:
+                raise InfrastructureError('gpu_unavailable')
+            if probe.stdout.strip():
+                raise InfrastructureError('gpu_busy')
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     def run(self, command: list[str], *, timeout: float, stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(command, input=stdin, capture_output=True, text=True, timeout=timeout,
-                              env={**os.environ, "WITNESS_GPU_WORKSPACE": self.workspace})
+        from .execution import run_process
+        return run_process(command, input=stdin, text=True, timeout=timeout,
+                           cancelled=self.cancelled, remaining_s=self.remaining_s,
+                           env={**os.environ, 'WITNESS_GPU_WORKSPACE': self.workspace})
 
     def put(self, sources: list[Path], destination: str) -> None:
         for source in sources:
-            shutil.copy(source, destination)
+            target = Path(destination) / source.name if Path(destination).is_dir() else Path(destination)
+            if source.resolve() == target.resolve():
+                continue
+            partial = target.with_name(target.name + '.copying')
+            try:
+                with source.open('rb') as src, partial.open('wb') as dst:
+                    while chunk := src.read(1024 * 1024):
+                        if self.cancelled() or self.remaining_s() <= 0:
+                            raise InfrastructureError('evaluation_cancelled_or_budget_expired')
+                        dst.write(chunk)
+                partial.chmod(0o600)
+                partial.replace(target)
+            finally:
+                partial.unlink(missing_ok=True)
 
     def read(self, path: str) -> str:
         return Path(path).read_text() if Path(path).exists() else ""

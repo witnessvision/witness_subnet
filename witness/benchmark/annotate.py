@@ -92,9 +92,9 @@ def _schema() -> dict:
                 "uncertainties": {"type": "array", "items": {"type": "string"}}})
 
 
-def contact_sheets(clip: Path, out: Path, duration: float) -> list[dict]:
+def contact_sheets(clip: Path, out: Path, duration: float, *, run=subprocess.run) -> list[dict]:
     count = int(duration / FRAME_SPACING_S + 1e-9)
-    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vf",
+    raw = run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vf",
                           f"fps={1 / FRAME_SPACING_S},scale=480:270", "-frames:v", str(count),
                           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=120, check=True).stdout
     size = 480 * 270 * 3
@@ -117,8 +117,8 @@ def contact_sheets(clip: Path, out: Path, duration: float) -> list[dict]:
     return sheets
 
 
-def wav_bytes(clip: Path) -> tuple[bytes, np.ndarray]:
-    pcm = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vn", "-ac", "1", "-ar", "16000",
+def wav_bytes(clip: Path, *, run=subprocess.run) -> tuple[bytes, np.ndarray]:
+    pcm = run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vn", "-ac", "1", "-ar", "16000",
                           "-f", "s16le", "-"], capture_output=True, timeout=90, check=True).stdout
     buffer = BytesIO()
     with wave.open(buffer, "wb") as stream:
@@ -171,7 +171,8 @@ def _fits(fact: dict, packet: dict) -> str | None:
     return None
 
 
-def label_clip(clip: Path, duration: float, audio: dict, api, work: Path, *, labeling: int = 0) -> tuple[Reference, dict]:
+def label_clip(clip: Path, duration: float, audio: dict, api, work: Path, *, labeling: int = 0,
+               run=subprocess.run) -> tuple[Reference, dict]:
     """Label one clip with ``api`` (a vision-capable ``ApiText``) from its frames and GPU audio evidence.
 
     ``duration`` is the task duration, so the reference binds to the task exactly.
@@ -179,12 +180,12 @@ def label_clip(clip: Path, duration: float, audio: dict, api, work: Path, *, lab
     provider request, so a cached answer is never reused as a second labeling.
     """
     clip_sha = sha256_file(clip)
-    if abs(float(probe(clip)["format"]["duration"]) - duration) > .15:
+    if abs(float(probe(clip, run=run)["format"]["duration"]) - duration) > .15:
         raise ValueError("clip_duration_mismatch")
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     started = time.monotonic()
-    sheets = contact_sheets(clip, work, duration)
-    _, samples = wav_bytes(clip)
+    sheets = contact_sheets(clip, work, duration, run=run)
+    _, samples = wav_bytes(clip, run=run)
     packet = {"clip_sha256": clip_sha, "duration": duration, "frame_spacing_s": FRAME_SPACING_S,
               "frames": int(duration / FRAME_SPACING_S + 1e-9), "speech_segments": audio["speech_segments"],
               "sound_windows": audio["sound_windows"], "audio_levels": audio_levels(samples, duration)}

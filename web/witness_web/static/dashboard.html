@@ -21,12 +21,16 @@
  <div class="sn-topbar-actions"><span class="sn-updated" id="updated"></span><button class="sn-btn" id="refresh" type="button">Refresh</button></div>
 </header>
 <p class="sn-demo" id="demo-banner" hidden><strong>DEMO DATA</strong> These are labelled examples served by the backend, not chain state.</p>
+<p class="sn-stale" id="stale-banner" role="status" hidden><strong>STALE</strong><span id="stale-text"></span></p>
 <main id="main" class="sn-content">
  <section id="overview" aria-labelledby="overview-heading">
-  <div class="sn-heading"><div><p class="sn-eyebrow">WITNESS SUBNET</p><h1 id="overview-heading">King, window and weights</h1></div></div>
+  <div class="sn-heading"><div><p class="sn-eyebrow">WITNESS SUBNET</p><h1 id="overview-heading">King, weights and live evaluation</h1></div></div>
   <div id="errors"></div>
   <div class="sn-overview" id="overview-body" aria-busy="true"><p class="sn-loading">Reading finalized chain state…</p></div>
   <ul class="sn-rules" aria-label="Evaluation policy">
+   <li>No king: 100% burn</li>
+   <li>King: 30% king · 70% burn</li>
+   <li>First king needs 2 valid submissions</li>
    <li>Window = 2 epochs</li>
    <li>Each evaluator samples 5 videos × 2 clips from 1,000</li>
    <li>2 Luna references per clip</li>
@@ -40,7 +44,7 @@
  </section>
 
  <section id="validators" aria-labelledby="validators-heading">
-  <div class="sn-section-head"><h2 id="validators-heading">Validators</h2><p>Mode and freshness of each validator’s on-chain commitment. Select one to inspect its queue, hotkeys and evaluations.</p></div>
+  <div class="sn-section-head"><h2 id="validators-heading">Validators</h2><p>Validators that publish status to this dashboard: mode, chain freshness and latest signed progress telemetry (display only). Reporting is opt-in, so registered validators may be missing here. Select one to inspect its queue, hotkeys and evaluations.</p></div>
   <div id="validators-body"><p class="sn-loading">Loading validators…</p></div>
  </section>
 
@@ -68,7 +72,7 @@
  </section>
 
  <section id="evaluations" aria-labelledby="evaluations-heading">
-  <div class="sn-section-head"><h2 id="evaluations-heading">Evaluations</h2><p>Aggregates published by the selected evaluator. Per-clip detail, paired with the king on the same batch, opens once the window has closed.</p></div>
+  <div class="sn-section-head"><h2 id="evaluations-heading">Evaluations</h2><p>Aggregates published by the selected evaluator. Once the window has closed, the report opens with playable clips, each model’s timestamped claims, timing and scores, paired with the king on the same batch.</p></div>
   <div id="evaluations-body"><p class="sn-loading">Loading evaluations…</p></div>
  </section>
 

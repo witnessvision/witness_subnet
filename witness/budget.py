@@ -16,7 +16,6 @@ import time
 import uuid
 
 NANO = 1_000_000_000
-LIMITS = {"validator": 9 * NANO}  # the evaluator's labeling and judging, per UTC day
 
 
 class BudgetUnavailable(RuntimeError):
@@ -31,8 +30,9 @@ def nanos(usd):
 
 
 class DailyBudget:
-    def __init__(self, path: Path, *, clock=time.time):
+    def __init__(self, path: Path, *, clock=time.time, daily_limit_usd=9.):
         self.path, self.clock = Path(path), clock
+        self.limits = {'validator': None if daily_limit_usd is None else nanos(daily_limit_usd)}
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.connect() as db:
             db.executescript("""
@@ -44,7 +44,7 @@ class DailyBudget:
                 CREATE INDEX IF NOT EXISTS daily_role ON reservations(day, role);
                 CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
             """)
-            policy = json.dumps(LIMITS, sort_keys=True)
+            policy = json.dumps(self.limits, sort_keys=True)
             db.execute("INSERT OR IGNORE INTO policy VALUES(1, ?)", (policy,))
             if db.execute("SELECT value FROM policy WHERE id=1").fetchone()[0] != policy:
                 raise BudgetUnavailable("budget_policy_changed")
@@ -64,7 +64,7 @@ class DailyBudget:
         return datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
 
     def reserve(self, *, role, provider, input_hash, upper_usd, call_id=None):
-        if role not in LIMITS or provider not in ("openai", "saygm"):
+        if role not in self.limits or provider not in ("openai", "saygm"):
             raise ValueError("invalid_budget_identity")
         amount, day = nanos(upper_usd), self.day()
         call_id = call_id or uuid.uuid4().hex
@@ -75,7 +75,7 @@ class DailyBudget:
             total, own = db.execute("""SELECT COALESCE(SUM(COALESCE(settled,reserved)),0),
                 COALESCE(SUM(CASE WHEN role=? THEN COALESCE(settled,reserved) ELSE 0 END),0)
                 FROM reservations WHERE day=?""", (role, day)).fetchone()
-            if own + amount > LIMITS[role] or total + amount > sum(LIMITS.values()):
+            if self.limits[role] is not None and own + amount > self.limits[role]:
                 raise BudgetUnavailable("daily_budget_exhausted")
             db.execute("INSERT INTO reservations VALUES(?,?,?,?,?,?,NULL,?)",
                        (call_id, day, role, provider, input_hash, amount, "{}"))

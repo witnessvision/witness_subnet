@@ -46,6 +46,18 @@ def prepare(gpu: Gpu, job: str) -> str:
     return remote
 
 
+def setup_main():
+    """One-time local preparation; no cloud provider, wallet or chain access."""
+    import argparse
+    from .gpu import LocalGpu
+    parser = argparse.ArgumentParser(description=setup_main.__doc__)
+    parser.add_argument('--workspace', type=Path, required=True)
+    args = parser.parse_args()
+    gpu = LocalGpu({'workspace': str(args.workspace)}, args.workspace)
+    prepare(gpu, 'setup')
+    print('GPU environments ready')
+
+
 def _run_job(gpu: Gpu, script: str, environment: str, spec: dict, local: Path, remote: str,
              seconds: float, *, cancelled=lambda: False) -> tuple[int, str]:
     """Send one job spec, run ``script`` on it for at most ``seconds``; return (exit status, output lines)."""

@@ -44,6 +44,7 @@ class Chain:
                 'last_update': dict(zip(keys, map(int, info.last_update))),
                 'burn_uid': keys.index(owner) if owner in keys else None,
                 'tempo': int(query('Tempo')), 'weights_rate_limit': int(query('WeightsSetRateLimit')),
+                'weights_version': int(query('WeightsVersionKey')),
                 'commit_reveal': bool(query('CommitRevealWeightsEnabled')),
                 'reveal_epochs': int(query('RevealPeriodEpochs')),
                 'min_weights': int(query('MinAllowedWeights')), 'max_weight': int(query('MaxWeightsLimit'))}

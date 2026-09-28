@@ -36,7 +36,8 @@ IMAGE_TOKENS = 4096  # upper bound per high-detail image
 
 class ApiText:
     def __init__(self, model: str, cache: Path, *, provider: str = "openai", effort: str = "low",
-                 max_tokens: int = 2048, budget_path: str | None = None, cache_only: bool = False):
+                 max_tokens: int = 2048, budget_path: str | None = None, cache_only: bool = False,
+                 daily_limit_usd: float | None = 9.):
         if model not in RATES:
             raise ValueError("model_has_no_verified_rate")
         if provider not in PROVIDERS:
@@ -45,6 +46,7 @@ class ApiText:
         self.model, self.effort, self.max_tokens = model, effort, max_tokens
         self.cache, self.cache_only = cache, cache_only
         self.budget_path = budget_path or os.environ.get("WITNESS_BUDGET_DB")
+        self.daily_limit_usd = daily_limit_usd
         self.calls: list[dict] = []
         self.request_timeout_s = lambda: 300.
         cache.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -98,7 +100,7 @@ class ApiText:
         timeout = self.request_timeout_s()
         if timeout <= 0:
             raise TimeoutError('api_evaluation_deadline_expired')
-        budget = DailyBudget(Path(self.budget_path))
+        budget = DailyBudget(Path(self.budget_path), daily_limit_usd=self.daily_limit_usd)
         call_id = uuid.uuid4().hex
         with sqlite3.connect(self.ledger, timeout=30) as db:
             db.execute("BEGIN IMMEDIATE")

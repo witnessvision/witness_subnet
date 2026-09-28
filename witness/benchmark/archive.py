@@ -37,13 +37,16 @@ def license_ok(value) -> bool:
         for url in values)
 
 
-def request(client: httpx.Client, url, *, params=None, output: Path | None = None, expected_size: int | None = None):
+def request(client: httpx.Client, url, *, params=None, output: Path | None = None, expected_size: int | None = None,
+            cancelled=lambda: False):
     """GET from archive.org only, following at most five same-site redirects.
 
     With ``output`` the body is streamed to that file and must have exactly
     ``expected_size`` bytes; otherwise a bounded JSON body is returned.
     """
     for _ in range(6):
+        if cancelled():
+            raise InterruptedError('source_download_cancelled')
         parsed = urlparse(str(url))
         host = parsed.hostname or ""
         if (parsed.scheme != "https" or not (host == "archive.org" or host.endswith(".archive.org"))
@@ -59,6 +62,8 @@ def request(client: httpx.Client, url, *, params=None, output: Path | None = Non
             target = output.open("wb") if output else None
             try:
                 for chunk in response.iter_bytes():
+                    if cancelled():
+                        raise InterruptedError('source_download_cancelled')
                     size += len(chunk)
                     if size > limit:
                         raise ValueError("archive_response_too_large")

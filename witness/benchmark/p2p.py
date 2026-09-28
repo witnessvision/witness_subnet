@@ -222,12 +222,18 @@ class ModelClient:
     def __init__(self, keypair, receiver, host, port, submission: Submission, *, allow_loopback=False):
         self.address = endpoint(host, port, allow_loopback=allow_loopback)
         self.keypair, self.receiver, self.submission = keypair, receiver, submission
+        self.cancelled = lambda: False
+        self.remaining_s = lambda: 30.
 
     def get(self, target, limit):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE  # certificate hash is bound by the miner's on-chain commitment
-        connection = HTTPSConnection(*self.address, context=ctx, timeout=30)
+        remaining = min(30., self.remaining_s())
+        if self.cancelled() or remaining <= 0:
+            raise InterruptedError('model_download_cancelled')
+        deadline = time.monotonic() + remaining
+        connection = HTTPSConnection(*self.address, context=ctx, timeout=min(5., remaining))
         try:
             connection.connect()
             if hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest() != self.submission.certificate:
@@ -238,10 +244,19 @@ class ModelClient:
                 raise OSError(f'model_server_status_{response.status}')
             if int(response.getheader('Content-Length', '-1')) not in range(limit + 1):
                 raise ValueError('unbounded_model_response')
-            body = response.read(limit + 1)
+            body = bytearray()
+            while True:
+                if self.cancelled() or time.monotonic() >= deadline:
+                    raise InterruptedError('model_download_cancelled')
+                chunk = response.read1(min(65536, limit + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+                if len(body) > limit:
+                    break
             if len(body) > limit:
                 raise ValueError('model_response_too_large')
-            return body
+            return bytes(body)
         finally:
             connection.close()
 

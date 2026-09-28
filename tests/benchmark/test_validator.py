@@ -73,7 +73,7 @@ def test_stake_average_is_paired_and_only_one_winner():
     outcome = decide(rows, window=1, policy=POLICY, king=king,
                      candidates={MODELS[i]: entry(i) for i in (1, 2)}, snapshot=snapshot())
     assert outcome['king']['hotkey'] == MINERS[1]
-    assert outcome['uids'] == [1] and outcome['weights'] == [1.]
+    assert outcome['uids'] == [1, 6] and outcome['weights'] == pytest.approx([.3, .7])
     # Repetition, another policy and a stale window must not affect stake.
     altered = rows + [*rows, result(0, 2, 65535, 65535, policy='e'*64),
                       result(0, 2, 65535, 65535, window=0)]
@@ -84,19 +84,19 @@ def test_stake_average_is_paired_and_only_one_winner():
 def test_one_evaluator_suffices_but_missing_or_mismatched_baseline_does_not():
     rows = [result(0, 0, 40000, 30000, flags=CONTROLS_OK|BASELINE), result(0, 1, 50000, 45000)]
     kwargs = dict(window=1, policy=POLICY, king=entry(0), candidates={MODELS[1]: entry(1)}, snapshot=snapshot())
-    assert decide(rows, **kwargs)['uids'] == [1]
-    assert decide(rows[1:], **kwargs)['uids'] == [0]
-    assert decide([rows[0], result(0, 1, 50000, 45000, kr=1)], **kwargs)['uids'] == [0]
-    assert decide([rows[0], result(0, 1, 0, 0, flags=REJECTED)], **kwargs)['uids'] == [0]
+    assert decide(rows, **kwargs)['uids'] == [1, 6]
+    assert decide(rows[1:], **kwargs)['uids'] == [0, 6]
+    assert decide([rows[0], result(0, 1, 50000, 45000, kr=1)], **kwargs)['uids'] == [0, 6]
+    assert decide([rows[0], result(0, 1, 0, 0, flags=REJECTED)], **kwargs)['uids'] == [0, 6]
 
 
 def test_margin_tie_and_deregistered_winner():
     rows = [result(0, 0, 40000, 30000, flags=CONTROLS_OK|BASELINE), result(0, 1, 40000, 30001)]
     kwargs = dict(window=1, policy=POLICY, king=entry(0), candidates={MODELS[1]: entry(1)}, snapshot=snapshot())
-    assert decide(rows, **kwargs)['uids'] == [0]
+    assert decide(rows, **kwargs)['uids'] == [0, 6]
     rows[-1] = result(0, 1, 50000, 45000)
     kwargs['snapshot'] = snapshot(uids={MINERS[0]: 0})
-    assert decide(rows, **kwargs)['uids'] == [0]  # a departed challenger cannot evict the incumbent
+    assert decide(rows, **kwargs)['uids'] == [0, 6]  # a departed challenger cannot evict the incumbent
     kwargs['snapshot'] = snapshot(uids={})
     assert decide(rows, **kwargs)['source'] == 'burn_no_king'
 
@@ -165,7 +165,7 @@ def fill_ledger(tmp_path, scores=True):
 def test_chain_only_bootstrap_closes_at_epoch_boundary_and_replays(tmp_path):
     ledger = fill_ledger(tmp_path)
     assert ledger.get('king')['hotkey'] == MINERS[1]
-    assert ledger.get('decision')['uids'] == [1]
+    assert ledger.get('decision')['uids'] == [1, 6]
     assert ledger.is_closed(1)
     assert len(ledger.usage(VALS[0])) == 2
     ledger.close()
@@ -424,7 +424,7 @@ def test_follower_replays_history_without_writes_and_restart_reconciles_unknown(
     chain = Chain()
     follower = Validator(hotkey=VALS[0], root=tmp_path, chain=chain, store=store, ledger=ledger)
     intent = follower.step()
-    assert intent['uids'] == [0] and intent['weights'] == [1.]
+    assert intent['uids'] == [0, 6] and intent['weights'] == pytest.approx([.3, .7])
     assert follower.future is None and not (tmp_path/'weight-send.json').exists()
     follower.close()
     write_private(tmp_path/'weight-send.json', {'status': 'submitting', 'block': 8, 'uids': [0], 'weights': [1.]})
@@ -615,7 +615,7 @@ def test_rejected_score_counts_as_zero_in_stake_denominator():
     rows += [result(0, 1, 0, 0, flags=CONTROLS_OK|REJECTED), result(1, 1, 65535, 65535)]
     outcome = decide(rows, window=1, policy=POLICY, king=entry(0),
                      candidates={MODELS[1]: entry(1)}, snapshot=snapshot())
-    assert outcome['uids'] == [0]
+    assert outcome['uids'] == [0, 6]
     assert outcome['aggregates'][MODELS[1]]['quality'] == pytest.approx(.1)
     assert outcome['aggregates'][MODELS[1]]['stake'] == 10
     with pytest.raises(ValueError, match='score_zero'):

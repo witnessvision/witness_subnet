@@ -58,6 +58,7 @@ def merge(sources):
         validators.append({'hotkey': hotkey, 'mode': state['mode'], 'stake': state.get('stake'),
                            'block': state['block'], 'commitment_block': state.get('commitment_block'),
                            'freshness': 'fresh' if fresh else 'stale',
+                           'progress': state.get('progress'),
                            'used_count': sum(r.get('usage') == 'consumed' for r in rows),
                            'reserved_count': sum(r.get('usage') == 'reserved' for r in rows)})
         queues[hotkey] = sorted([{k: r.get(k) for k in ('hotkey', 'coldkey', 'model_id', 'block', 'position',
@@ -72,8 +73,14 @@ def merge(sources):
 
 
 class Projection:
-    def __init__(self, sources):
-        self.sources = list(map(str, sources))
+    def __init__(self, sources, peer_directory=None):
+        self.configured_sources = list(map(str, sources))
+        self.peer_directory = Path(peer_directory) if peer_directory else None
+
+    @property
+    def sources(self):
+        peers = sorted(self.peer_directory.glob('*.json')) if self.peer_directory else []
+        return self.configured_sources + list(map(str, peers))
 
     def state(self):
         return merge(self.sources)

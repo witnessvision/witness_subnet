@@ -19,14 +19,14 @@ PREPROCESSOR_ID = content_hash({"version": 5, "threads": 1, "bitexact": True, "v
                                 "audio": "aac-mono-16000", "ffmpeg": _ffmpeg_version()})
 
 
-def _run(command: list[str]) -> None:
-    result = subprocess.run(command, capture_output=True, check=False, timeout=180)
+def _run(command: list[str], run=subprocess.run) -> None:
+    result = run(command, capture_output=True, check=False, timeout=180)
     if result.returncode:
         raise ValueError("ffmpeg_media_processing_failed")
 
 
-def probe(path: Path) -> dict:
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams",
+def probe(path: Path, *, run=subprocess.run) -> dict:
+    result = run(["ffprobe", "-v", "error", "-show_format", "-show_streams",
                              "-of", "json", str(path)], capture_output=True, check=False, timeout=30)
     if result.returncode:
         raise ValueError("unreadable_media")
@@ -38,10 +38,10 @@ def probe(path: Path) -> dict:
     return body
 
 
-def render_clip(source: Path, destination: Path, *, start: float, duration: float) -> str:
+def render_clip(source: Path, destination: Path, *, start: float, duration: float, run=subprocess.run) -> str:
     if start < 0 or not CLIP_MIN_S <= duration <= CLIP_MAX_S or not source.is_file():
         raise ValueError("invalid_clip_bounds")
-    source_duration = float(probe(source)["format"]["duration"])
+    source_duration = float(probe(source, run=run)["format"]["duration"])
     if start + duration > source_duration + .05:
         raise ValueError("clip_outside_source")
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -54,15 +54,15 @@ def render_clip(source: Path, destination: Path, *, start: float, duration: floa
           "-af", "aresample=16000", "-ac", "1", "-c:a", "aac", "-ar", "16000",
           "-fflags", "+bitexact", "-flags", "+bitexact",
           "-map_metadata", "-1", "-map_chapters", "-1", "-metadata", "creation_time=", "-movflags", "+faststart",
-          str(destination)])
+          str(destination)], run=run)
     # A damaged original can yield an undecodable clip; that is a preprocessing
     # failure (replaced from the reserve), never a clip shown to miners.
-    check = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(destination), "-f", "null", "-"],
+    check = run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(destination), "-f", "null", "-"],
                            capture_output=True, timeout=180, check=False)
     if check.returncode or check.stderr.strip():
         destination.unlink(missing_ok=True)
         raise ValueError("rendered_clip_not_decodable")
-    media = probe(destination)
+    media = probe(destination, run=run)
     if abs(float(media["format"]["duration"]) - duration) > DURATION_SLACK_S:
         raise ValueError("rendered_clip_duration_mismatch")
     destination.chmod(0o600)

@@ -85,15 +85,14 @@ its provisional bound. Unresolved bounds may block an ambiguous promotion.
 Only a bound that rules out victory at window close consumes that evaluator's
 attempt; an unresolved partial remains retryable. Bootstrap uses full results.
 
-After the shared batch is prepared, the paired model/scoring attempt has a
-900-second budget and cancels when its starting epoch changes. GPU workers check
-cancellation while loading, warming up and generating; the remote job also has
-an absolute deadline if the controller disconnects. Model loading is capped at
-120 seconds per worker and warmup at one clip deadline. Judge requests are
-capped at 60 seconds and the remaining attempt budget. Provisioning, setup,
-transfers and source preparation have separate I/O limits: 900 seconds is not an
-end-to-end cold-start guarantee. Real timing and remote cancellation remain
-required activation checks.
+The paired attempt has a 900-second budget starting before shared preparation
+and downloads, and cancels when its starting epoch changes. Local media and GPU
+processes poll cancellation and terminate owned children with a five-second kill
+backstop. Model loading is capped at 120 seconds per worker and warmup at one clip
+deadline. Label/judge requests use at most 30 seconds and the remaining attempt
+budget; in-flight network operations have their own bounded unwind time. GPU
+setup belongs to installation. Real timing and cancellation remain required
+activation checks; this is not a claim that every cold model can finish in 15 minutes.
 Completed video grades are checkpointed against the exact clip hashes within
 the window, so a deferred attempt resumes without rerunning completed videos.
 
