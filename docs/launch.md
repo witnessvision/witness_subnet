@@ -1,5 +1,23 @@
 # Mainnet v2 activation
 
+## Shared checkpoint
+
+Validators following the current SN20 mainnet protocol use:
+
+| Parameter | Value |
+| --- | --- |
+| Network / netuid | Finney / 20 |
+| Activation block | `9168259` |
+| Finalized block hash | `0x085952610b9e139f00fa3b2fda5b6afa61240bf89dbb8c7f4663e70bab62a4bf` |
+| Actual subnet epoch at activation | `25402` |
+| Protocol source release | `053cee682b8ebf41ee101dc0df8d0a8330c60a6c` |
+| Policy digest | `d063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918` |
+
+Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
+ledger directory. These are shared protocol coordinates, not a certificate that
+all real acceptance checks below have completed. The allocation is 100% burn
+before a king is selected, then 70% burn and 30% to the king.
+
 The implementation and synthetic/local integration tests are not an activation
 certificate. Do not announce GPU architecture support or enable production
 writes until the corresponding checks below have measured evidence.
