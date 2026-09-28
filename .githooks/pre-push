@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Reject wrong Witness authentication, destination or outgoing commit identities."""
+import pathlib
+import subprocess
+import sys
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True).strip()
+
+def fail(message):
+    sys.exit("Witness push blocked: " + message)
+
+def private_path(path):
+    """Allow only the public package and documented web assets."""
+    parts = pathlib.PurePosixPath(path).parts
+    if any(part in {".git", ".git.archived", ".codex", ".private", "__pycache__"}
+           or part.startswith(".venv") for part in parts):
+        return True
+    name = parts[-1]
+    if name in {"AGENTS.md", "CLAUDE.md"}:
+        return True
+    if ((name == ".env" or name.startswith(".env.")) and name != ".env.example"
+            or name.endswith((".pem", ".key", ".safetensors", ".ckpt", ".gguf", ".bundle"))):
+        return True
+    blocked = ("witness/miner/", "witness/train/", "witness/eval/", "scripts/",
+               "data/", "reports/", "models/", "archive/", "research/", "artifacts/",
+               "configs/", "deploy/", "docs/archive/")
+    if path.startswith(blocked) or path in {"witness/bench.py", "witness/benchmark_v18.py"}:
+        return True
+    if path.startswith("requirements-") and path != "requirements-evaluator.txt":
+        return True
+    if not path.startswith("web/"):
+        return False
+    if path in {"web/README.md", "web/.gitignore", "web/pyproject.toml"}:
+        return False
+    relative = pathlib.PurePosixPath(path)
+    if path.startswith("web/tests/"):
+        return relative.suffix != ".py"
+    if path.startswith("web/witness_web/static/"):
+        return relative.suffix not in {".html", ".css", ".js", ".svg", ".jpg", ".png", ".woff2"}
+    if path.startswith("web/witness_web/"):
+        return relative.suffix != ".py"
+    return True
+
+identity = "techwhiz-semantha"
+email = "179846318+techwhiz-semantha@users.noreply.github.com"
+expected = "git@github.com:witnessvision/witness_subnet.git"
+if len(sys.argv) != 3 or sys.argv[2] != expected:
+    fail("unexpected destination")
+if git("config", "user.name") != identity or git("config", "user.email") != email:
+    fail("incorrect configured identity")
+expected_ssh = "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/witness"
+import os
+if os.environ.get("GIT_SSH_COMMAND") or os.environ.get("GIT_SSH") or git("config", "core.sshCommand") != expected_ssh:
+    fail("SSH routing differs from the dedicated Witness key")
+probe = subprocess.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=15", "-i", str(pathlib.Path.home()/".ssh/witness"), "git@github.com"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+if "Hi techwhiz-semantha! You've successfully authenticated" not in probe.stdout + probe.stderr:
+    fail("SSH account could not be verified")
+approved_root = subprocess.run(
+    ["git", "config", "--get", "witness.publicRoot"], capture_output=True, text=True
+).stdout.strip()
+for line in sys.stdin:
+    local_ref, local_sha, remote_ref, remote_sha = line.split()
+    if set(local_sha) == {"0"}:
+        fail("branch deletion requires separate review")
+    if approved_root and git("rev-list", "--max-parents=0", local_sha).splitlines() != [approved_root]:
+        fail("outgoing history has an unapproved root")
+    revision = local_sha if set(remote_sha) == {"0"} else remote_sha + ".." + local_sha
+    for sha in git("rev-list", revision).splitlines():
+        paths = git("ls-tree", "-r", "--name-only", sha).splitlines()
+        if any(private_path(path) for path in paths):
+            fail("private miner or research artifacts in outgoing history")
+        actual = git("show", "-s", "--format=%an%n%ae%n%cn%n%ce", sha).splitlines()
+        if actual != [identity, email, identity, email]:
+            fail("wrong author or committer in " + sha[:12])

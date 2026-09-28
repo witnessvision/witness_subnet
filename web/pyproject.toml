@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "witness-web"
+version = "0.1.0"
+description = "Witness landing page and evidence dashboard"
+requires-python = ">=3.11"
+dependencies = ["witness-subnet==0.3.0", "fastapi==0.141.1", "uvicorn==0.52.4"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+include = ["witness_web*"]
+
+[tool.setuptools.package-data]
+witness_web = ["static/*", "static/fonts/*", "static/media/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

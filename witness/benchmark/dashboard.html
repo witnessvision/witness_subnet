@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Witness subnet · king and challenges</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--ink:#1c1c1a;--muted:#6b6b66;--line:#e3e2dc;--good:#1f7a4d;--bad:#b3261e;--run:#8a5a00;--accent:#2f4fb5;--demo:#fff3cd}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--card:#1d1d1b;--ink:#ecebe6;--muted:#9d9c95;--line:#33322e;--good:#5cc28b;--bad:#f08a80;--run:#e0b050;--accent:#8ea8ff;--demo:#3a3016}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:24px 16px}h1{font-size:20px;margin:0 0 4px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:28px 0 8px}
+p{margin:0 0 8px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.mono,code{font-family:ui-monospace,monospace;font-size:13px}.muted{color:var(--muted)}.small{font-size:12px}a{color:var(--accent)}
+.demo{background:var(--demo);border:1px solid var(--run);color:var(--ink);border-radius:8px;padding:8px 12px;margin:12px 0}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:680px}th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600}tbody tr:last-child td{border-bottom:0}.num{text-align:right}
+.tag{display:inline-block;font-size:12px;font-weight:600;padding:0 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--run)}
+.id{display:inline-flex;gap:6px;align-items:center;max-width:100%;min-width:0}.id code{white-space:nowrap}.id.full code{white-space:normal;word-break:break-all;min-width:0}
+p,li,.card,.demo{overflow-wrap:anywhere}
+button,select,input{font:inherit;color:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}
+.copy{border:1px solid var(--line);background:transparent;border-radius:4px;font-size:11px;padding:0 5px}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:6px;padding:5px 11px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+select,input{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 9px;max-width:100%}input{flex:1;min-width:180px}
+.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent);font-weight:600}
+ol.steps{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}ol.steps li{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+details summary{cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;background:var(--bg);padding:8px;border-radius:6px;font-size:12px;margin:4px 0}
+.grow{flex:1;margin:0}.rules{margin-top:10px}.detail{padding:10px 0}.detail table{min-width:760px}
+@media (max-width:700px){
+ main{padding:16px 12px}
+ .scroll{overflow:visible;border:0;background:transparent}
+ table,.detail table{min-width:0}table,tbody,tr,td{display:block;width:100%}
+ thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+ tr{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;padding:4px 12px}
+ td{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;text-align:right;overflow-wrap:anywhere;min-width:0}
+ td[data-label]::before{content:attr(data-label);font-size:12px;color:var(--muted);font-weight:600;text-align:left;flex-shrink:0}
+ td:empty{display:none}.num{text-align:right}
+ td.detail{display:block;text-align:left}.detail tr{background:var(--bg)}
+ .tag{white-space:normal;overflow-wrap:anywhere}
+ .bar input{min-width:0}
+}
+</style></head><body><main>
+<h1>Witness subnet · king and challenges</h1>
+<p class="small muted">Read-only view of finalized chain data. It does not coordinate validators or affect consensus. Missing values are shown as unknown.</p>
+<p class="demo" id="demo" hidden><b>DEMO DATA</b> · labelled examples, not chain state.</p>
+<p class="small muted" id="chain"></p>
+<div id="errors"></div>
+<div class="grid" id="overview"><div class="card muted">Loading…</div></div>
+<p class="small muted rules">Window = 2 epochs · each evaluator samples 5 videos × 2 clips from 1,000 · 2 Luna references per clip · king and challengers share the batch · 60 s answer limit per clip · one 90% futility check after 3 videos, for this batch only · early stops publish upper bounds and never crown · clip detail after the window closes · reward = quality × (0.8 + 0.2 × time_score)</p>
+<h2>Validators</h2><div class="scroll" id="validators"></div>
+<div class="bar"><label for="validator" class="label">Validator</label><select id="validator"></select></div>
+<h2>Fair queue</h2><p class="small muted">Backend order and status. A coldkey may register several hotkeys; one immutable challenge per hotkey.</p><div class="scroll" id="queue"></div>
+<h2>Hotkeys</h2><p class="small muted">Consumed: evaluated once by this evaluator. Reserved: waiting or held for an infrastructure retry. King reference reuse does not count again.</p>
+<div class="bar"><span class="tabs" role="tablist"><button class="btn" role="tab" data-state="consumed" aria-selected="true">Consumed <span id="n-consumed">—</span></button> <button class="btn" role="tab" data-state="reserved" aria-selected="false">Reserved <span id="n-reserved">—</span></button></span>
+<form id="search" class="bar grow" role="search"><input id="q" type="search" placeholder="Search hotkey, coldkey or model" aria-label="Search hotkeys"><button class="btn">Search</button></form></div>
+<div class="scroll" id="hotkeys"></div><div class="bar small muted" id="pager"></div>
+<h2>Evaluations</h2><div class="scroll" id="evaluations"></div>
+<p class="small muted" id="updated"></p>
+</main><script>
+"use strict";
+const $ = id => document.getElementById(id);
+const el = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; };
+const known = v => v !== null && v !== undefined;
+const int = n => known(n) && Number.isFinite(n) ? n.toLocaleString("en-US") : "unknown";
+const dec = (n, d = 3) => known(n) && Number.isFinite(n) ? n.toFixed(d) : "–";
+const short = s => s.length > 18 ? s.slice(0, 8) + "…" + s.slice(-6) : s;
+const read = async p => { const r = await fetch(p, {cache: "no-store"}); if (!r.ok) throw new Error(r.status); return r.json(); };
+function id(v, full) {
+  if (!known(v) || v === "") return el("span", "unknown", "muted");
+  const s = String(v), w = el("span", null, full ? "id full" : "id"), c = el("code", full ? s : short(s)), b = el("button", "copy", "copy");
+  c.title = s; b.type = "button"; b.setAttribute("aria-label", "Copy full identifier");
+  b.onclick = async () => { try { await navigator.clipboard.writeText(s); b.textContent = "copied"; } catch { b.textContent = "failed"; } setTimeout(() => b.textContent = "copy", 1400); };
+  w.append(c, b); return w;
+}
+const TONE = {good: ["fresh", "applied", "consumed", "evaluated", "done", "closed", "success", "finalized", "included"], warn: ["stale", "reserved", "queued", "pending", "running", "retry", "open", "submitted"], bad: ["unreachable", "failed", "error", "rejected", "invalid", "expired", "timeout"]};
+const score = (v, up) => known(v) || !known(up) ? dec(v) : el("span", `≤ ${dec(up)} upper bound`, "warn");
+const evalStatus = v => v === "early_stop" ? el("span", "Early stop", "tag warn") : tag(v);
+function tag(v) { if (!known(v) || v === "") return el("span", "unknown", "muted"); const s = String(v), k = s.toLowerCase(); return el("span", s, "tag " + (Object.keys(TONE).find(t => TONE[t].includes(k)) || "")); }
+const put = (cell, v) => { if (v !== "") cell.append(v instanceof Node ? v : el("span", v)); };
+function table(target, cols, rows, emptyText) {
+  const t = el("table"), h = el("tr"), b = el("tbody");
+  cols.forEach(c => { const th = el("th", c.replace(/^#/, "")); if (c[0] === "#") th.className = "num"; h.append(th); });
+  const head = el("thead"); head.append(h);
+  rows.forEach(r => { const tr = el("tr"); r.forEach((v, i) => { const td = el("td"); if (cols[i][0] === "#") td.className = "num"; td.dataset.label = cols[i].replace(/^#/, ""); put(td, v); tr.append(td); }); b.append(tr); });
+  if (!rows.length) { const tr = el("tr"), td = el("td", emptyText, "muted"); td.colSpan = cols.length; tr.append(td); b.append(tr); }
+  t.append(head, b); target.replaceChildren(t); return t;
+}
+const S = {data: null, v: null, hk: {state: "consumed", q: "", page: 1, seq: 0}};
+const cur = () => (S.data?.validators || []).find(v => v.hotkey === S.v);
+function overview(d) {
+  $("demo").hidden = d.is_demo !== true;
+  $("chain").textContent = `Block ${int(d.block)} · policy ${d.policy_hash ?? "unknown"}`;
+  const errors = $("errors"); errors.replaceChildren();
+  for (const e of d.errors || []) errors.append(el("p", `${e.source ?? "source"}: ${e.error ?? "error"}`, "small bad"));
+  const o = $("overview"); o.replaceChildren();
+  const king = el("div", null, "card"); king.append(el("div", "King", "label"));
+  if (d.king) { king.append(id(d.king.hotkey)); for (const [label, value] of [["coldkey ", d.king.coldkey], ["model ", d.king.model_id]]) { const m = el("div", label, "small muted"); m.append(id(value)); king.append(m); } }
+  else king.append(el("p", "No king reported.", "muted"));
+  const w = d.window, win = el("div", null, "card"); win.append(el("div", "Window (2 epochs)", "label"));
+  if (w) { const p = el("p"); p.append(el("b", `#${w.id} `), tag(w.state)); win.append(p, el("div", `epochs ${w.start_epoch ?? "?"}–${w.end_epoch ?? "?"} · start block ${int(w.start_block)} · end block ${known(w.end_block) ? int(w.end_block) : "pending finalization"}`, "small muted")); }
+  else win.append(el("p", "No window reported.", "muted"));
+  const wt = d.weights || {}, ws = el("div", null, "card"), ol = el("ol", null, "steps"); ws.append(el("div", "Weights", "label"));
+  for (const [k, label] of [["decision", "Decision"], ["submitted", "Submitted"], ["applied", "Applied"]]) {
+    const x = wt[k], li = el("li"); li.append(el("b", label));
+    if (x) { li.append(id(x.hotkey), el("span", `block ${int(x.block)}`, "small muted")); if (k === "submitted") li.append(tag(x.status)); if (k !== "decision" && wt.decision && x.hotkey !== wt.decision.hotkey) li.append(el("span", "differs from decision", "tag warn")); if (k === "decision" && Array.isArray(x.inconclusive) && x.inconclusive.length) li.append(el("span", `${x.inconclusive.length} inconclusive: early-stop evidence was incomplete and could not decide a promotion; unresolved evaluators may retry with the next window's fresh batch`, "small warn")); }
+    else li.append(el("span", "none reported", "muted"));
+    ol.append(li);
+  }
+  ws.append(ol); o.append(king, win, ws);
+}
+function scoped() {
+  const d = S.data, vs = d.validators || [];
+  table($("validators"), ["Hotkey", "Mode", "#Stake", "Freshness", "#Block", "#Commitment", "#Consumed", "#Reserved"],
+    vs.map(v => [id(v.hotkey), tag(v.mode), known(v.stake) ? v.stake.toLocaleString("en-US", {maximumFractionDigits: 2}) : "unknown", tag(v.freshness), int(v.block), known(v.commitment_block) ? int(v.commitment_block) : "none", int(v.used_count), int(v.reserved_count)]), "No validators reported.");
+  const sel = $("validator"); sel.replaceChildren(...vs.map(v => { const o = el("option", `${short(String(v.hotkey))} · ${v.mode ?? "unknown"}`); o.value = v.hotkey; return o; }));
+  if (!vs.length) sel.append(el("option", "no validators"));
+  sel.disabled = !vs.length;
+  if (S.v) sel.value = S.v;
+  const q = S.v && d.queues ? d.queues[S.v] : undefined;
+  table($("queue"), ["#Pos", "Hotkey", "Coldkey", "Model", "#Block", "Status", "Usage", "#Window", "Reason"],
+    (q || []).map(r => [known(r.position) ? String(r.position) : "–", id(r.hotkey), id(r.coldkey), id(r.model_id), int(r.block), tag(r.status), tag(r.usage), known(r.window_id) ? String(r.window_id) : "–", r.reason ?? "–"]),
+    Array.isArray(q) ? "Queue empty." : "No queue reported for this validator.");
+  const v = cur(); $("n-consumed").textContent = v ? int(v.used_count) : "—"; $("n-reserved").textContent = v ? int(v.reserved_count) : "—";
+  const evs = (d.evaluations || []).filter(e => e.validator === S.v);
+  const t = table($("evaluations"), ["#Window", "Hotkey", "Model", "Status", "#Quality", "#Reward", "Report", "Detail"],
+    evs.map(e => { const b = el("button", e.available ? "show" : "why unavailable", "btn small"); b.type = "button"; b.onclick = () => detail(e, b); return [known(e.window_id) ? String(e.window_id) : "–", id(e.hotkey), id(e.model_id), evalStatus(e.status), score(e.quality, e.quality_upper), score(e.reward, e.reward_upper), known(e.report_hash) ? id(e.report_hash) : el("span", "missing", "muted"), b]; }),
+    "No evaluations from this validator.");
+}
+async function detail(e, button) {
+  const row = button.closest("tr");
+  if (row.nextSibling && row.nextSibling.dataset.detail) { row.nextSibling.remove(); return; }
+  const tr = el("tr"), td = el("td", "Loading…", "detail"); tr.dataset.detail = "1"; td.colSpan = 8; tr.append(td); row.after(tr);
+  try {
+    const x = await read(["api/evaluations", e.validator, e.window_id, e.model_id].map((p, i) => i ? encodeURIComponent(String(p)) : p).join("/"));
+    td.replaceChildren();
+    if (x.available !== true) { td.append(el("p", `Not available: ${x.reason ?? "no reason given"}`, "muted")); return; }
+    const head = el("p", null, "small"); head.append("Challenger ", id(x.hotkey), " vs king ", x.opponent ? id(x.opponent.hotkey) : el("span", "none paired", "muted"));
+    const t = x.total || {}, early = x.evaluation_status === "early_stop", s = x.early_stop || {};
+    td.append(head);
+    if (early) td.append(el("p", `Early stop · ${s.observed_videos ?? "?"} of ${s.planned_videos ?? "?"} videos evaluated · ${s.method === "finite_batch_90" ? `${known(s.confidence) ? Math.round(s.confidence * 100) : "?"}% futility check for this fixed batch only` : s.method === "best_possible_completion" ? "a perfect remainder could not win" : `method ${s.method ?? "unknown"}`}. The challenger total is an upper bound, not a measured score, and never crowns. Evaluated clips below are measured.`, "demo small"));
+    td.append(el("p", early ? `Total quality ≤ ${dec(t.quality_upper ?? s.quality_upper)} / reward ≤ ${dec(t.reward_upper ?? s.reward_upper)} (upper bound) · king quality ${dec(t.king_quality)} / reward ${dec(t.king_reward)}` : `Total quality ${dec(t.quality)} / reward ${dec(t.reward)} · king quality ${dec(t.king_quality)} / reward ${dec(t.king_reward)}`, "small"));
+    const rows = [];
+    for (const v of x.videos || []) {
+      rows.push([el("b", `Video ${v.id ?? "?"} average`), "", dec(v.quality), "", "", dec(v.reward), dec(v.king_quality), dec(v.king_reward), ""]);
+      for (const c of v.clips || []) {
+        const resp = el("details"); resp.append(el("summary", "responses"));
+        resp.append(el("div", "challenger", "small muted"), el("pre", c.response == null ? "no response" : typeof c.response === "string" ? c.response : JSON.stringify(c.response, null, 2)));
+        if (c.king) resp.append(el("div", "king", "small muted"), el("pre", c.king.response == null ? "no response" : typeof c.king.response === "string" ? c.king.response : JSON.stringify(c.king.response, null, 2)));
+        const clip = el("span"); clip.append(el("span", `clip ${c.id ?? "?"} `));
+        if (c.video_url) { try { const u = new URL(c.video_url, location.href); if (u.origin === location.origin) { const a = el("a", "video"); a.href = u.href; a.target = "_blank"; a.rel = "noopener"; clip.append(a); } } catch {} }
+        rows.push([clip, known(c.start) && known(c.duration) ? `${dec(c.start, 1)}+${dec(c.duration, 1)} s` : "–", dec(c.quality), known(c.latency_s) ? dec(c.latency_s, 2) + " s" : "–", dec(c.time_score), dec(c.reward), dec(c.king?.quality), dec(c.king?.reward), resp]);
+      }
+    }
+    const box = el("div", null, "scroll"); td.append(box);
+    table(box, ["Clip", "Range", "#Quality", "#Latency", "#Time score", "#Reward", "#King quality", "#King reward", "Responses"], rows, "No clips in report.");
+    td.append(el("p", `report ${x.report_hash ?? "hash missing"}`, "small muted mono"));
+  } catch { td.textContent = "Detail could not be loaded."; }
+}
+async function hotkeys() {
+  const v = cur(), seq = ++S.hk.seq; if (!v) { $("hotkeys").replaceChildren(); $("pager").replaceChildren(); return; }
+  for (const b of document.querySelectorAll("[role=tab]")) b.setAttribute("aria-selected", String(b.dataset.state === S.hk.state));
+  try {
+    const d = await read("api/hotkeys?" + new URLSearchParams({validator: S.v, state: S.hk.state, q: S.hk.q, page: String(S.hk.page)}));
+    if (seq !== S.hk.seq) return;
+    table($("hotkeys"), ["Hotkey", "Coldkey", "Model", "Status", "#Window", "Reason"], (d.rows || []).map(r => [id(r.hotkey, true), id(r.coldkey, true), id(r.model_id), tag(r.status), known(r.window_id) ? String(r.window_id) : "–", r.reason ?? "–"]), S.hk.q ? "No matches." : `No ${S.hk.state} hotkeys.`);
+    const size = d.page_size || 50, page = d.page || S.hk.page, pages = Number.isFinite(d.total) ? Math.max(1, Math.ceil(d.total / size)) : null;
+    const prev = el("button", "← prev", "btn"), next = el("button", "next →", "btn");
+    prev.disabled = page <= 1; next.disabled = pages == null ? (d.rows || []).length < size : page >= pages;
+    prev.onclick = () => { S.hk.page = page - 1; hotkeys(); }; next.onclick = () => { S.hk.page = page + 1; hotkeys(); };
+    $("pager").replaceChildren(prev, el("span", `page ${page}${pages ? " of " + pages : ""} · ${int(d.total)} total`), next);
+  } catch { if (seq === S.hk.seq) $("hotkeys").textContent = "Hotkey list could not be loaded."; }
+}
+function choose(v) { S.v = v; S.hk.page = 1; scoped(); hotkeys(); }
+async function refresh() {
+  try {
+    const d = await read("api/subnet"); S.data = d;
+    const vs = d.validators || [], first = !S.v;
+    if (!vs.some(v => v.hotkey === S.v)) S.v = (vs.find(v => v.mode === "evaluator" && v.freshness === "fresh") || vs.find(v => v.mode === "evaluator") || vs[0] || {}).hotkey ?? null;
+    overview(d); scoped(); if (first) hotkeys();
+    $("updated").textContent = "Fetched " + new Date().toLocaleTimeString() + " · refreshes every 60 s";
+  } catch { $("updated").textContent = "Fetch failed · retrying in 60 s"; if (!S.data) { $("overview").replaceChildren(el("div", "Subnet state unavailable.", "card bad")); $("validator").replaceChildren(el("option", "unavailable")); $("validator").disabled = true; } }
+}
+$("validator").onchange = e => choose(e.target.value);
+for (const b of document.querySelectorAll("[role=tab]")) b.onclick = () => { S.hk.state = b.dataset.state; S.hk.page = 1; hotkeys(); };
+$("search").onsubmit = e => { e.preventDefault(); S.hk.q = $("q").value.trim(); S.hk.page = 1; hotkeys(); };
+refresh(); setInterval(() => { if (!document.hidden && !document.querySelector("[data-detail]")) refresh(); }, 60000);
+</script></body></html>

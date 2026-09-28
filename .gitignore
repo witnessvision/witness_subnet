@@ -1,0 +1,37 @@
+# Local Python environments, caches and build products
+AGENTS.md
+CLAUDE.md
+.venv*/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local credentials; only the empty example belongs in source
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local evidence and private material never belong in this public repository
+/.codex/
+/.private/
+/artifacts/
+/data/
+/models/
+/reports/
+/knowledge/
+/configs/
+/deploy/
+/scripts/
+/rounds/
+/feedback/
+*.log
+/web/.codex/
+/web/data/
+/web/reports/
+/web/deploy/

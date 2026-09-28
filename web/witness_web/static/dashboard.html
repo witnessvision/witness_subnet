@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Subnet dashboard — Witness</title><link rel="icon" href="/static/mark.svg" type="image/svg+xml"><link rel="stylesheet" href="/static/subnet.css"><script defer src="/static/subnet.js"></script></head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<aside class="sn-sidebar">
+ <a class="sn-brand" href="/"><img src="/static/mark.svg" alt="" width="28" height="28">witness<span>.</span></a>
+ <p class="sn-caption">SUBNET DASHBOARD</p>
+ <nav aria-label="Dashboard sections">
+  <a href="#overview">Overview</a>
+  <a href="#validators">Validators</a>
+  <a href="#queue">Fair queue</a>
+  <a href="#hotkeys">Hotkeys</a>
+  <a href="#evaluations">Evaluations</a>
+ </nav>
+ <div class="sn-sidebar-bottom"><p>Read only. Finalized chain data. Turning this dashboard off has no effect on consensus.</p><a href="/">About Witness ↗</a></div>
+</aside>
+<div class="sn-main">
+<header class="sn-topbar">
+ <dl class="sn-chain" id="chain-meta" aria-live="polite"></dl>
+ <div class="sn-topbar-actions"><span class="sn-updated" id="updated"></span><button class="sn-btn" id="refresh" type="button">Refresh</button></div>
+</header>
+<p class="sn-demo" id="demo-banner" hidden><strong>DEMO DATA</strong> These are labelled examples served by the backend, not chain state.</p>
+<main id="main" class="sn-content">
+ <section id="overview" aria-labelledby="overview-heading">
+  <div class="sn-heading"><div><p class="sn-eyebrow">WITNESS SUBNET</p><h1 id="overview-heading">King, window and weights</h1></div></div>
+  <div id="errors"></div>
+  <div class="sn-overview" id="overview-body" aria-busy="true"><p class="sn-loading">Reading finalized chain state…</p></div>
+  <ul class="sn-rules" aria-label="Evaluation policy">
+   <li>Window = 2 epochs</li>
+   <li>Each evaluator samples 5 videos × 2 clips from 1,000</li>
+   <li>2 Luna references per clip</li>
+   <li>King and challengers share the same batch</li>
+   <li>60 s answer limit per clip</li>
+   <li>One 90% futility check after 3 videos, for this batch only</li>
+   <li>Early stops publish upper bounds and never crown</li>
+   <li>Clip detail revealed only after the window closes</li>
+   <li>reward = quality × (0.8 + 0.2 × time_score)</li>
+  </ul>
+ </section>
+
+ <section id="validators" aria-labelledby="validators-heading">
+  <div class="sn-section-head"><h2 id="validators-heading">Validators</h2><p>Mode and freshness of each validator’s on-chain commitment. Select one to inspect its queue, hotkeys and evaluations.</p></div>
+  <div id="validators-body"><p class="sn-loading">Loading validators…</p></div>
+ </section>
+
+ <div class="sn-scope" id="scope" role="group" aria-label="Selected validator">
+  <label for="validator-select">Validator</label>
+  <select id="validator-select" disabled><option>Loading…</option></select>
+  <span class="sn-scope-id" id="scope-id"></span>
+ </div>
+
+ <section id="queue" aria-labelledby="queue-heading">
+  <div class="sn-section-head"><h2 id="queue-heading">Fair queue</h2><p>Order, status and reason come from the backend. A coldkey may register several hotkeys; each hotkey carries one immutable challenge.</p></div>
+  <div id="queue-body"><p class="sn-loading">Loading queue…</p></div>
+ </section>
+
+ <section id="hotkeys" aria-labelledby="hotkeys-heading">
+  <div class="sn-section-head"><h2 id="hotkeys-heading">Consumed and reserved hotkeys</h2><p>Each evaluator evaluates a hotkey once; then it is consumed. Hotkeys waiting or held for an infrastructure retry stay reserved. Reusing the king’s reference does not consume it again.</p></div>
+  <div class="sn-hk-controls">
+   <div class="sn-tabs" role="tablist" aria-label="Hotkey state">
+    <button type="button" role="tab" id="tab-consumed" data-state="consumed" aria-selected="true" aria-controls="hotkeys-body">Consumed <span class="sn-count" id="count-consumed">—</span></button>
+    <button type="button" role="tab" id="tab-reserved" data-state="reserved" aria-selected="false" aria-controls="hotkeys-body" tabindex="-1">Reserved <span class="sn-count" id="count-reserved">—</span></button>
+   </div>
+   <form class="sn-search" id="hotkey-search" role="search"><label class="sn-visually-hidden" for="hotkey-query">Search hotkey, coldkey or model</label><input id="hotkey-query" type="search" placeholder="Hotkey, coldkey or model" autocomplete="off" spellcheck="false"><button class="sn-btn" type="submit">Search</button></form>
+  </div>
+  <div id="hotkeys-body" role="tabpanel" aria-labelledby="tab-consumed" aria-live="polite"><p class="sn-loading">Loading hotkeys…</p></div>
+ </section>
+
+ <section id="evaluations" aria-labelledby="evaluations-heading">
+  <div class="sn-section-head"><h2 id="evaluations-heading">Evaluations</h2><p>Aggregates published by the selected evaluator. Per-clip detail, paired with the king on the same batch, opens once the window has closed.</p></div>
+  <div id="evaluations-body"><p class="sn-loading">Loading evaluations…</p></div>
+ </section>
+
+ <footer class="sn-footer"><span>witness. / Read-only subnet dashboard</span><span>Missing values are shown as unknown, never as zero.</span></footer>
+</main>
+</div>
+<dialog class="sn-dialog" id="detail" aria-labelledby="detail-title">
+ <div class="sn-dialog-head"><div><p class="sn-eyebrow" id="detail-context"></p><h2 id="detail-title">Evaluation detail</h2></div><button class="sn-btn" type="button" id="detail-close">Close</button></div>
+ <div class="sn-dialog-body" id="detail-body" aria-live="polite"></div>
+</dialog>
+<noscript><p class="sn-noscript">JavaScript is needed for this dashboard. <a href="/api/subnet">Read the subnet state as JSON</a>.</p></noscript>
+</body></html>

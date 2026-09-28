@@ -1,0 +1,2 @@
+# Follower validator and miner (default): minimal dependencies.
+-e .

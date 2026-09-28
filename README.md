@@ -1,0 +1,74 @@
+# Witness
+
+Witness is a video-understanding subnet for Bittensor SN20. Miners serve immutable
+model weights to evaluator validators. Evaluators compare models on private,
+random audiovisual clips; CPU followers reproduce the decision from finalized
+on-chain scores. **One king receives 100% of the validator's weight.**
+
+[Website](https://witnessvision.io/) · [Miner guide](docs/miner.md) ·
+[Validator guide](docs/validator.md) · [Scoring](docs/benchmark.md) ·
+[Activation checklist](docs/launch.md)
+
+## Mainnet v2 flow
+
+1. **Submit:** prepare an allowlisted weights-only model and publish its `wm2`
+   commitment. Serve it over pinned TLS with signed requests. The default miner
+   admits only permitted validators holding at least **100,000 subnet alpha**.
+   Witness charges no challenge fee; normal network registration/transaction
+   costs still apply. One hotkey binds one model permanently.
+2. **Queue:** each evaluator keeps durable round-robin coldkey order and FIFO
+   within a coldkey. `A1,A2,A3,B1,C1` becomes `A1,B1,C1,A2,A3`. Infrastructure
+   failures retain the same submission for retry. A terminal evaluation consumes
+   that hotkey for that evaluator.
+3. **Evaluate:** every two actual subnet epochs, each evaluator privately samples
+   **5 videos from a public catalogue of 1,000**, then **2 random 10–30 s clips per
+   video**. Luna supplies two references per clip. The king and all challengers
+   admitted to that window share its batch. The king runs once per window.
+4. **Publish:** publish compact per-model quality, reward and paired king scores
+   through chain commitments before deciding weights. Followers replay every
+   finalized block; the latest commitment alone is insufficient.
+5. **Crown:** at window close, use stake-weighted paired reward improvement.
+   A challenger must exceed the king by more than `0.02`, with aggregate quality
+   above `0.05`. The bootstrap compares the first two eligible submissions on a
+   common evaluator panel. With no king, weights go to the subnet-owner burn UID.
+6. **Display:** the dashboard reads validator projections and closed-window
+   reports. It shows the queue, consumed/reserved hotkeys, responses, clip/video/
+   total metrics and decision/submission/applied weights. It is never a consensus
+   source; private labels and sampling secrets are not published.
+
+## Install and test
+
+Use Python 3.11+ and a repository-local environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -e '.[evaluator,dev]' -e 'web[dev]'  # evaluation, web and tests
+.venv/bin/python -m pytest -q
+```
+
+Evaluators also need ffmpeg and an explicitly configured GPU/API budget. The
+follower is the default and requires neither. Chain writes require explicit
+flags. See the activation checklist before starting paid evaluation or weights.
+
+The public repository contains protocol, scoring, validator runtime, tests, an
+empty miner template and the website in [`web/`](web/README.md). The web package
+shares this Git repository and depends on the subnet package. Credentials,
+non-public evaluation references and runtime outputs stay outside this repository.
+
+## Code map
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py`, `ledger.py`, `chain.py`, `commitments.py` | Compact records, finalized replay and deterministic consensus |
+| `submission.py`, `p2p.py`, `miner.py` | Immutable manifests, authenticated TLS and empty miner template |
+| `triggers.py`, `validator.py`, `evaluator.py` | Fair queue, CPU chain loop, GPU worker and durable publication |
+| `pool.py`, `data/catalogue-v2.json`, `annotate.py`, `media.py` | Private per-window sampling and references |
+| `reward.py`, `scoring.py`, `judge.py`, `adjudication.py` | Versioned quality and time reward |
+| `gpu.py`, `watchdog.py`, `runner.py`, `pod_runtime.py`, `pod_env/` | GPU lifecycle, independent stop watchdog and pinned inference |
+| `dashboard.py` | Read-only display API and standalone dashboard |
+| `round.py`, `duel.py`, `simulation.py`, `cli.py` | Offline benchmark/rehearsal utilities; no mainnet coronation authority |
+
+Paths in this table are relative to `witness/benchmark/`. Synthetic tests establish
+software behavior, not GPU compatibility, model capability or finalized live
+weight acceptance. Activation requires the separate checks in the launch guide.

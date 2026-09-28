@@ -1,0 +1,2 @@
+# Evaluator validator: also needs ffmpeg on PATH and a GPU backend (docs/validator.md).
+-e .[evaluator]

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "witness-subnet"
+version = "0.3.0"
+description = "Witness video-understanding Bittensor subnet: miners submit weights, validators keep the best model as king"
+readme = "README.md"
+requires-python = ">=3.11"
+# Follower validators and miners need only these.
+dependencies = [
+  "bittensor==10.5.0",
+  "httpx==0.28.1",
+  "cryptography==50.0.1",
+  "numpy==2.4.6",
+  "pydantic==2.13.5",
+]
+
+[project.optional-dependencies]
+# Evaluator validators, pool labeling and the local rehearsal; they also need ffmpeg.
+evaluator = ["Pillow==12.3.0"]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+witness-benchmark = "witness.benchmark.cli:main"
+witness-benchmark-miner = "witness.benchmark.miner:main"
+witness-validator = "witness.benchmark.validator:main"
+witness-dashboard = "witness.benchmark.dashboard:main"
+witness-gpu-watchdog = "witness.benchmark.watchdog:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["witness*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "web/tests"]
+
+[tool.setuptools.package-data]
+"witness.benchmark" = ["pod_setup.sh", "pod_env/*.txt", "data/*.json", "dashboard.html"]
