@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 import secrets
 import threading
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, unquote
 
 import httpx
 
@@ -40,14 +40,29 @@ def _salt(root: Path) -> str:
     return json.loads(path.read_text())["salt"]
 
 
-def _cut(root: Path, video: dict, salt: str, *, cancelled=lambda: False, remaining_s=lambda: float('inf')) -> list[dict]:
+def source_url(video: dict, source_urls: dict | None = None) -> str:
+    """Optional resolved Archive mirror, bound to the same catalogue item/file."""
+    url = (source_urls or {}).get(video['identifier'])
+    if url is None:
+        return f"https://archive.org/download/{quote(video['identifier'], safe='')}/{quote(video['file'])}"
+    parsed = urlparse(url)
+    if (parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.archive.org')
+            or parsed.username or parsed.password or parsed.port not in (None, 443)
+            or parsed.query or parsed.fragment
+            or not unquote(parsed.path).endswith('/items/' + video['identifier'] + '/' + video['file'])):
+        raise ValueError('invalid_archive_source_mirror')
+    return url
+
+
+def _cut(root: Path, video: dict, salt: str, *, cancelled=lambda: False, remaining_s=lambda: float('inf'),
+         source_urls=None) -> list[dict]:
     """Download one original, render its evaluation windows and delete it."""
     source = root / "src" / (video["identifier"] + ".mp4")
     rows = []
     try:
         run = partial(run_process, cancelled=cancelled, remaining_s=remaining_s)
         with httpx.Client(timeout=max(.1, min(15., remaining_s())), headers={"User-Agent": "WitnessValidator/1.0"}) as client:
-            request(client, f"https://archive.org/download/{quote(video['identifier'], safe='')}/{quote(video['file'])}",
+            request(client, source_url(video, source_urls),
                     output=source, expected_size=video["size"], cancelled=cancelled)
         length = float(probe(source, run=run)['format']['duration'])
         for index, start, duration in windows(video["identifier"], length, salt):
@@ -64,7 +79,7 @@ def _cut(root: Path, video: dict, salt: str, *, cancelled=lambda: False, remaini
     return rows
 
 
-def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None) -> dict:
+def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_urls=None) -> dict:
     """Build or complete the pool; every stage skips what is already on disk."""
     for name in ("src", "clips", "references", "evidence", "labeling"):
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -85,7 +100,7 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None) -> dict:
     salt = salt or _salt(root)
 
     def cut(video):
-        result = _cut(root, video, salt, cancelled=cancelled, remaining_s=remaining_s)
+        result = _cut(root, video, salt, cancelled=cancelled, remaining_s=remaining_s, source_urls=source_urls)
         with lock, rows_path.open("a") as stream:
             for row in result:
                 stream.write(json.dumps(row) + "\n")
@@ -156,7 +171,7 @@ def load_pool(root: Path, policy: Policy) -> list[dict]:
 
 
 def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: Policy,
-                 catalogue: Path | None = None, log=print) -> list[dict]:
+                 catalogue: Path | None = None, log=print, source_urls=None) -> list[dict]:
     """One fresh private draw per evaluator/window, stable across retries/restarts."""
     import random
     catalogue = catalogue or Path(__file__).parent / "data" / "catalogue-v2.json"
@@ -170,7 +185,7 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
     target = root / "windows" / str(window)
     store_immutable(target / "draw.json", {"window": window, "validator": validator,
                                            "selected": selected, "seed_hash": content_hash(salt)})
-    build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log)
+    build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log, source_urls=source_urls)
     rows = load_pool(target, policy)
     if len(rows) != EVAL.videos * EVAL.clips_per_video:
         raise RuntimeError("window_batch_incomplete")

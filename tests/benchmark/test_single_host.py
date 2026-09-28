@@ -19,6 +19,20 @@ from witness.benchmark.validator import submit_weights
 from witness_web.app import create_app
 
 
+def test_archive_mirror_cannot_change_source_or_leave_archive():
+    from witness.benchmark.pool import source_url
+    video = {'identifier': 'source-1', 'file': 'clip one.mp4'}
+    assert source_url(video) == 'https://archive.org/download/source-1/clip%20one.mp4'
+    good = 'https://dn1.ca.archive.org/0/items/source-1/clip%20one.mp4'
+    assert source_url(video, {'source-1': good}) == good
+    for bad in ('https://evil.example/0/items/source-1/clip%20one.mp4',
+                good.replace('source-1', 'other'), good.replace('https:', 'http:'),
+                good + '?redirect=elsewhere', good.replace('dn1.', 'user:password@dn1.'),
+                good.replace('.org/', '.org:8443/')):
+        with pytest.raises(ValueError):
+            source_url(video, {'source-1': bad})
+
+
 def test_weights_use_finalized_chain_required_version():
     calls = []
     def query(module, name, params, **kwargs):

@@ -55,6 +55,9 @@ class Evaluator:
                 'judge_model', 'gpt-5.6-terra') != 'gpt-5.6-terra':
             raise ValueError('mainnet_v2_scoring_policy_is_versioned_not_per_validator')
         gpu = make_gpu(config['gpu'], root)
+        source_urls = json.loads(Path(config['source_urls']).read_text()) if config.get('source_urls') else None
+        if source_urls is not None and not isinstance(source_urls, dict):
+            raise ValueError('source_urls_requires_mapping')
         provider = config.get('provider', 'openai')
         labeler = ApiText('gpt-6-luna', root / 'label-cache', provider=provider, effort='low', max_tokens=16000,
                           budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
@@ -100,7 +103,7 @@ class Evaluator:
 
         evaluator = cls(root=root, hotkey=hotkey, ledger=ledger, policy=policy, judge=judge, gpu=gpu,
                    batch_factory=lambda window: window_batch(root / 'pool-v2', window['id'], hotkey,
-                       gpu=gpu, api=labeler, policy=policy), download=download,
+                       gpu=gpu, api=labeler, policy=policy, source_urls=source_urls), download=download,
                    runner=lambda submissions, job: PodRunner(gpu, submissions, policy, job))
         api.request_timeout_s = labeler.request_timeout_s = lambda: (
             min(30., evaluator.deadline - time.monotonic()) if evaluator.deadline else 30.)

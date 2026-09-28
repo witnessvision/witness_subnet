@@ -51,6 +51,13 @@ configuration, stored privately outside the checkout:
 }
 ```
 
+If your host cannot reach the Archive frontend, `source_urls` may name a private
+JSON file mapping catalogue identifiers to their resolved official Archive HTTPS
+download URLs. Resolve these from the canonical download redirects. Only Archive
+subdomains and the same item/file path are accepted; file size and media checks
+still apply. Refresh stale URLs deliberately. This changes neither the 1,000-video
+catalogue nor the private draw, and does not enable arbitrary download hosts.
+
 Set `enabled_architectures` only after those loaders pass your real GPU qualification;
 no architecture is enabled by default. An unenabled architecture defers without
 consuming the submission. The examples assume Qwen2.5-Omni has passed.
