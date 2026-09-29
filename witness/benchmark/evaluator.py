@@ -312,7 +312,7 @@ class Evaluator:
         return {'schema_version': 'witness-evaluation-2', 'available': True, 'validator': self.hotkey,
                 'evaluation_status': 'early_stop' if partial else 'complete', 'early_stop': partial,
                 'window_id': window['id'], 'hotkey': entry['hotkey'], 'model_id': entry['model_id'],
-                'opponent': window['king'], 'videos': videos, 'policy_hash': self.ledger.policy,
+                'opponent': window['king'], 'videos': videos, 'policy_hash': self.ledger.policy_for_window(window['id']),
                 'total': {'quality': None if partial else scored['quality'], 'reward': None if partial else scored['reward'],
                           'quality_upper': scored['quality'] if partial else None,
                           'reward_upper': scored['reward'] if partial else None,
@@ -322,7 +322,7 @@ class Evaluator:
         report = self._report(entry, window, scored, baseline)
         evidence = content_hash(report)
         encode = upper_units if flags & EARLY_STOP else quantize
-        result = Result(window['id'], entry['uid'], entry['model_id'], self.ledger.policy[:24], evidence,
+        result = Result(window['id'], entry['uid'], entry['model_id'], self.ledger.policy_for_window(window['id'])[:24], evidence,
                         encode(scored['quality']), encode(scored['reward']),
                         quantize((baseline or {}).get('quality', 0.)), quantize((baseline or {}).get('reward', 0.)), flags)
         write_private(self.root / 'reports' / (evidence + '.json'), report)
@@ -345,10 +345,10 @@ class Evaluator:
                 record = Result.parse(row['value'])
             except ValueError:
                 continue
-            if record.window == window['id'] and record.policy == self.ledger.policy[:24]:
+            if record.window == window['id'] and record.policy == self.ledger.policy_for_window(window['id'])[:24]:
                 (partials if record.flags & EARLY_STOP else published).add(record.model_id)
         comparison = decide(self.ledger._voting_history(window, self.ledger.cursor + 1),
-                            window=window['id'], policy=self.ledger.policy, king=window['king'],
+                            window=window['id'], policy=self.ledger.policy_for_window(window['id']), king=window['king'],
                             candidates=window['candidates'], snapshot=snapshot)
         pending = [r for r in self.triggers.pending(10000, before_block=window['start_block'],
                     current_block=snapshot['block']) if r['model_id'] in window['candidates']

@@ -68,3 +68,21 @@ def test_ten_video_futility_false_stops_at_most_ten_percent_exact_prefixes():
     assert cut['planned_videos']==10 and cut['confidence']==.9
     assert futility([low]*4,.6,planned_videos=10) is None
     assert futility([low]*9,.6,planned_videos=10)['confidence']==1.
+
+
+def test_result_and_report_keep_current_window_policy_during_upgrade(tmp_path):
+    import threading
+    from witness.benchmark.evaluator import Evaluator
+    worker=Evaluator.__new__(Evaluator)
+    worker.root=tmp_path; worker.hotkey='validator'; worker.lock=threading.RLock(); worker.outbox=[]
+    worker.ledger=Ledger(tmp_path/'chain.sqlite3',activation_block=1,activation_epoch=0,policy=policy_identity())
+    entry={'uid':1,'model_id':'a'*64,'hotkey':'miner'}
+    scored={'quality':.5,'reward':.4,'per_video':{},'grades':[]}
+    for window_id,expected in [(11,FIVE_VIDEO_POLICY),(12,policy_identity())]:
+        window={'id':window_id,'start_block':1,'king':None}
+        worker._enqueue(entry,window,scored,None,flags=1)
+        item=worker.outbox[-1]
+        assert Result.parse(item['value']).policy==expected[:24]
+        report=json.loads((tmp_path/'reports'/(item['report_hash']+'.json')).read_text())
+        assert report['policy_hash']==expected
+    worker.ledger.close()
