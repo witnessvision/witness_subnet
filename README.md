@@ -21,6 +21,10 @@ Before the first king is decided, the allocation is **100% burn**.
    within a coldkey. `A1,A2,A3,B1,C1` becomes `A1,B1,C1,A2,A3`. Infrastructure
    failures retain the same submission for retry. A terminal evaluation consumes
    that hotkey for that evaluator.
+   The candidate panel is frozen at the window's opening finalized block,
+   before drawing videos. Only immutable submissions committed strictly before
+   that block can run. New submissions remain queued for the next window;
+   retries and compression recovery cannot add or replace a model in the panel.
 3. **Evaluate:** every two actual subnet epochs, each evaluator privately samples
    **5 videos from a public catalogue of 1,000**, then **2 random 10–30 s clips per
    video**. Luna supplies two references per clip. The king and all challengers

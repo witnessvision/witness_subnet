@@ -4,7 +4,7 @@ import time
 import pytest
 
 from witness.benchmark.managed_evaluator import ScheduledTriggers
-from test_model_cache import evaluator_at
+from test_model_cache import evaluator_at, advance
 from test_validator import MODELS, MINERS, entry, snapshot
 
 
@@ -41,6 +41,65 @@ def test_window_filter_keeps_binding_cutoff_and_fair_coldkey_rotation(tmp_path):
     assert [row['model_id'] for row in triggers.pending(3)] == [MODELS[1], MODELS[0], MODELS[2]]
     active[MODELS[1]] = {**entry(1), 'hotkey': 'wrong-binding'}
     assert MODELS[1] not in {row['model_id'] for row in triggers.pending(10)}
+
+
+def test_panel_stays_frozen_while_queue_grows_and_after_restart(tmp_path, monkeypatch):
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    opening = ledger.active
+    advance(worker, ledger, 10, {9: [entry(3, block=9)], 10: [entry(4, block=10)]})
+    assert ledger.active == opening
+    assert {MODELS[3], MODELS[4]} <= {r['model_id'] for r in worker.triggers.rows()}
+    eligible = lambda: {r['model_id'] for r in worker.triggers.pending(
+        100, before_block=ledger.active['start_block'], current_block=ledger.cursor)}
+    assert not {MODELS[3], MODELS[4]} & eligible()
+    worker.triggers.close()
+    worker.triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3',
+        candidates=lambda: ledger.active['candidates'], interruption=lambda window: None)
+    assert not {MODELS[3], MODELS[4]} & eligible()
+    advance(worker, ledger, 12)
+    assert {MODELS[3], MODELS[4]} <= eligible()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('model_id', MODELS[3]), ('hotkey', MINERS[3]), ('value', entry(3)['value']),
+    ('block', 8), ('uid', 3),
+])
+def test_dispatch_guard_blocks_unfrozen_or_changed_entry_without_io_or_consumption(
+        tmp_path, monkeypatch, field, value):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window = ledger.active
+    challenger = {**window['candidates'][MODELS[2]], field: value}
+    before = ledger.usage(worker.hotkey)
+    def forbidden(*args):
+        pytest.fail('unadmitted model must not reach transport, batch or inference')
+    worker.compression_check = worker.batch_factory = worker.download = worker.runner = forbidden
+    with pytest.raises(InterruptedError, match='not_admitted_to_window'):
+        ManagedEvaluator._attempt(worker, challenger, window, snapshot(8), set())
+    assert ledger.usage(worker.hotkey) == before and not worker.outbox
+
+
+def test_dispatch_guard_uses_ledger_panel_not_modified_dispatch_copy(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window = ledger.active
+    forged = entry(3, block=7)
+    window['candidates'][MODELS[3]] = forged
+    worker.compression_check = lambda *args: pytest.fail('forged panel reached miner')
+    with pytest.raises(InterruptedError, match='not_admitted_to_window'):
+        ManagedEvaluator._attempt(worker, forged, window, snapshot(8), set())
+
+
+def test_admitted_dispatch_keeps_compression_and_evaluation_path(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator
+    from witness.benchmark.evaluator import Evaluator
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    calls = []
+    worker.compression_check = lambda *args: calls.append('compression')
+    monkeypatch.setattr(Evaluator, '_attempt', lambda *args: calls.append('evaluation'))
+    window = ledger.active
+    ManagedEvaluator._attempt(worker, window['candidates'][MODELS[2]], window, snapshot(8), set())
+    assert calls == ['compression', 'evaluation']
 
 
 @pytest.mark.parametrize('kind', ['window', 'epoch', 'budget', 'stop'])

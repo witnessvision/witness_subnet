@@ -162,6 +162,17 @@ class ManagedEvaluator(Evaluator):
         return worker
 
     def _attempt(self, entry, window, snapshot, partials):
+        # Recheck the authoritative opening immediately before any miner I/O.
+        # Queue growth or a stale/tampered dispatch must never expand this panel.
+        with self.ledger.lock:
+            opening = self.ledger.active
+            candidate = (opening or {}).get('candidates', {}).get(entry['model_id'])
+            if (not opening or opening['id'] != window['id']
+                    or opening['start_block'] != window['start_block']
+                    or not candidate or candidate['block'] >= opening['start_block']
+                    or any(entry.get(key) != candidate.get(key)
+                           for key in ('hotkey', 'model_id', 'value', 'block', 'uid'))):
+                raise InterruptedError('not_admitted_to_window')
         if self.compression_check is None:
             raise RuntimeError('compression_checker_required')
         self.compression_check(entry, snapshot, lambda: self._cancelled(window), 30.)
