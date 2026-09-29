@@ -270,8 +270,9 @@ def main():
             return submit_weights(writer_chain, wallet, args.netuid, uids, weights)
     evaluator = None
     if args.mode == 'evaluator':
-        from .evaluator import Evaluator
-        evaluator = Evaluator.from_config(json.loads(args.config.read_text()), root, hotkey, ledger, wallet.hotkey)
+        from .managed_evaluator import ManagedEvaluator
+        evaluator = ManagedEvaluator.from_config(
+            json.loads(args.config.read_text()), root, hotkey, ledger, wallet.hotkey)
     telemetry = None
     if args.telemetry_url:
         from .telemetry import TelemetrySender

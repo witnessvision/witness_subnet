@@ -15,6 +15,7 @@ dependencies = [
   "cryptography==50.0.1",
   "numpy==2.4.6",
   "pydantic==2.13.5",
+  "zstandard==0.25.0",
 ]
 
 [project.optional-dependencies]

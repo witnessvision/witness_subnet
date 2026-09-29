@@ -150,6 +150,93 @@ backstop; network requests can take their bounded timeout to unwind. GPU setup
 is an installation step, not part of a production duel. A 60-second model answer
 limit is distinct from model loading, labeling and judging time.
 
+Model acquisition uses at most two concurrent signed 4 MiB requests per miner,
+within the existing server limit. HTTP/1.1 connections are reused when supported;
+HTTP/1.0 peers remain compatible. Only contiguous completed ranges are appended
+to partial files, so retries resume without holes even if ranges arrive out of
+order. Interrupted or truncated transfers are retried; complete files must still
+match their committed hashes. Slow initial downloads can span multiple attempts
+and windows: the 900-second attempt limit is not a total download or duel limit.
+
+Planned epoch/window cancellation and an exhausted attempt budget resume without
+the exponential failure backoff. Real infrastructure failures still back off.
+Dispatch filters to the current window's eligible candidates before applying
+coldkey FIFO, so an ineligible submission cannot block an eligible sibling.
+On restart, queued legacy timeout/cancellation rows receive one immediate retry;
+their attempt counts, downloaded bytes and finalized usage remain intact.
+Retryable failures, including socket timeouts, disconnected peers and temporary
+server errors, retain a cooldown capped at five finalized blocks. Normal resumed
+turns do not turn a single failure into the maximum historical-attempt backoff.
+Restart also caps older queued backoffs; exhausted acquisition budgets remain
+parked. The cumulative acquisition budget below still limits repeated failures.
+`download-budgets/<model>.error.json` records only the exception type and, when
+available, a fixed transport code or HTTP status; it omits authentication and URLs.
+
+Miners must send each requested file range with lossless Zstandard compression. The
+validator decompresses it before writing, resumes at original byte offsets, and
+checks the same committed file hashes. Compressed and decoded sizes and decoder
+memory are bounded; malformed, oversized or concatenated frames are rejected.
+A one-byte authenticated probe checks support before batch preparation or inference,
+also for cached challengers. Raw/unsupported encodings and invalid frames exclude
+the challenger from the operational queue without a score or consumed hotkey. The
+local exclusion survives restarts; one bounded five-second recovery probe per worker
+pass retries entries after 25 finalized blocks. Updating the server requeues the
+same binding. Other eligible submissions, including coldkey siblings, can proceed.
+Previously finalized results and the current king remain intact.
+
+The client requires `zstd, identity;q=0`; tiny/incompressible ranges must still use
+Zstandard. Encoded frames allow at most 64 KiB of overhead over the requested
+original size. This changes neither model precision nor evaluation scores.
+
+Package limits apply to the original, decompressed bytes: 24 GB for SALMONN2 Pro
+and Qwen2.5 Omni, and 44 GB for Qwen3 Omni (decimal GB; only explicitly qualified
+architectures are enabled). The committed manifest is checked before requesting
+model files. Each request has a 30-second absolute deadline, additionally bounded
+by the remaining attempt budget, including peers that keep HTTP headers alive
+by slowly sending bytes. Cancellation closes the owned request socket. A miner
+cannot bypass the package limit by compressing oversized weights into a small
+response; each decoded range is at most 4 MiB and must match its original length.
+
+Each model has a persistent 90-minute budget for active acquisition, shared by
+all retries and windows on this evaluator. Queue waiting time is excluded;
+manifest transfer, file transfer and local verification during acquisition count.
+An individual turn remains bounded by 15 minutes and the enclosing attempt's
+remaining time. On normal exit, only elapsed acquisition time is charged. A
+crash conservatively charges the reserved turn (at most 15 minutes), so repeated
+restarts cannot reset the limit. Accounting starts when a model first reaches
+the budget-aware downloader; historical unrecorded transfer time is not inferred.
+
+Exhausting the budget parks acquisition for operator review with
+`DownloadBudgetExceeded`. The partial cache and hotkey reservation remain intact;
+no zero score or consumed hotkey is created. A parked entry does not block an
+eligible sibling sharing its coldkey. Ordinary restarts do not unpark it. Keep
+`download-budgets/` with the other validator state; deleting these records resets
+resource accounting and must not be used as an automatic retry mechanism.
+
+Known host video-decoder resource exhaustion is an infrastructure failure: defer
+and retry rather than scoring the miner's answer as zero. On hosts exposing many
+CPU cores, bound the service's CPU affinity and numerical-library thread counts
+so decoder/model thread pools cannot exhaust the process limit. Qualify the real
+clips under those service limits before publishing scores.
+
+For incident recovery, `evaluation_hold_windows: [WINDOW_ID]` in the evaluator
+configuration prevents new attempts in the listed windows while chain replay,
+the dashboard and weight submission continue. Holds do not amend chain history,
+publish replacement scores or consume hotkeys, and do not affect later windows.
+If an infrastructure-corrupted bootstrap result was already finalized, do not
+complete its pair: leave that window inconclusive and retry in a later window.
+
+Evaluators automatically remove completed challenger weight caches after the
+evaluation's consensus window closes. Cleanup runs between attempts and removes
+both the downloaded weights and their staged GPU copies. It preserves the current
+king, results awaiting publication, and retryable or inconclusive challenges,
+including partial downloads. Replaced kings are also eligible once no longer
+needed by a pending challenge. Scores, reports, clips and chain history remain
+available. Cleanup retries on failure and after restart; it never rents or starts
+a GPU just to remove files. An offline GPU copy is removed when reachable again.
+This is not a disk quota: allow space for the king and pending downloads as well
+as evaluation media and environments.
+
 ## Continuous queue and recovery
 
 - One immutable first submission per hotkey; coldkey ownership comes from the

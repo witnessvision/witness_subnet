@@ -1,16 +1,20 @@
 """Pinned TLS and btauth/1 for streaming model files. No model code is served."""
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
-from http.client import HTTPSConnection
+from http.client import HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import os
 from pathlib import Path
+from queue import LifoQueue
 import re
 import shutil
+import socket
 import ssl
 import threading
 import time
@@ -18,11 +22,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from witness.events import content_hash
 from witness.storage import sha256_file, write_private
+from .compression import (MAX_CHUNK_BYTES, MAX_FRAME_OVERHEAD, CompressionRequired,
+                          decode_model_chunk, encode_model_chunk)
+from .download_budget import DownloadBudget, DownloadBudgetExceeded
 from .submission import (MAX_MANIFEST_BYTES, Submission, check_config, validate_manifest,
                          verify_directory)
 
 MIN_STAKE_ALPHA = 100_000
-CHUNK = 4 * 1024 * 1024
+CHUNK = MAX_CHUNK_BYTES
+DOWNLOAD_CONNECTIONS = 2  # The existing server's per-validator request limit.
 
 
 def auth_payload(method, target, body, nonce, sender, receiver, scheme='sr25519'):
@@ -147,6 +155,8 @@ class ModelServer(ThreadingHTTPServer):
 
 
 class _ModelHandler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
     def log_message(self, *_):
         pass
 
@@ -198,9 +208,13 @@ class _ModelHandler(BaseHTTPRequestHandler):
                     return
                 stream.seek(offset)
                 body = stream.read(length)
+            body, encoding = encode_model_chunk(body, accept_encoding=self.headers.get('Accept-Encoding', ''))
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Vary', 'Accept-Encoding')
+            if encoding:
+                self.send_header('Content-Encoding', encoding)
             self.end_headers()
             self.wfile.write(body)
         except PermissionError:
@@ -224,41 +238,142 @@ class ModelClient:
         self.keypair, self.receiver, self.submission = keypair, receiver, submission
         self.cancelled = lambda: False
         self.remaining_s = lambda: 30.
+        self._connections = None
+        self._last_error = None
 
-    def get(self, target, limit):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE  # certificate hash is bound by the miner's on-chain commitment
+    def get(self, target, limit, *, compressed=False):
         remaining = min(30., self.remaining_s())
         if self.cancelled() or remaining <= 0:
             raise InterruptedError('model_download_cancelled')
         deadline = time.monotonic() + remaining
-        connection = HTTPSConnection(*self.address, context=ctx, timeout=min(5., remaining))
+        finished, expired = threading.Event(), threading.Event()
+        active_socket = [None]
+
+        def guard():
+            # Socket timeouts reset on incoming bytes. A peer dripping HTTP
+            # headers could otherwise hold getresponse() indefinitely.
+            while not finished.wait(min(.1, max(0., deadline - time.monotonic()))):
+                if self.cancelled() or time.monotonic() >= deadline:
+                    expired.set()
+                    sock = active_socket[0]
+                    if sock is not None:
+                        try:
+                            sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                    return
+
+        def timeout():
+            left = deadline - time.monotonic()
+            if expired.is_set() or self.cancelled() or left <= 0:
+                raise InterruptedError('model_download_cancelled')
+            return min(5., left)
+
+        pool = self._connections
+        connection = pool.get() if pool is not None else None
+        reusable = False
+        response = None
+        watchdog = threading.Thread(target=guard, name='model-request-deadline', daemon=True)
+        watchdog.start()
         try:
-            connection.connect()
-            if hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest() != self.submission.certificate:
-                raise ValueError('miner_tls_pin_mismatch')
-            connection.request('GET', target, headers=sign(self.keypair, 'GET', target, self.receiver))
-            response = connection.getresponse()
+            for attempt in range(2):
+                reused = connection is not None
+                if connection is None:
+                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE  # Pin is bound by the on-chain commitment.
+                    connection = HTTPSConnection(*self.address, context=ctx, timeout=timeout())
+                    connection.connect()
+                    if hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest() != self.submission.certificate:
+                        raise ValueError('miner_tls_pin_mismatch')
+                try:
+                    active_socket[0] = connection.sock
+                    connection.sock.settimeout(timeout())
+                    headers = sign(self.keypair, 'GET', target, self.receiver)
+                    if compressed:
+                        headers['Accept-Encoding'] = 'zstd, identity;q=0'
+                    connection.request('GET', target, headers=headers)
+                    connection.sock.settimeout(timeout())
+                    sock = connection.sock
+                    response = connection.getresponse()
+                    break
+                except (OSError, HTTPException):
+                    # A peer may close an idle keep-alive socket. Retry this GET
+                    # once on a freshly pinned connection, with a fresh nonce.
+                    if not reused or attempt:
+                        raise
+                    connection.close()
+                    connection = None
+            if compressed and response.status == 406:
+                raise CompressionRequired('zstandard_required')
             if response.status != 200:
                 raise OSError(f'model_server_status_{response.status}')
-            if int(response.getheader('Content-Length', '-1')) not in range(limit + 1):
+            encoding = response.getheader('Content-Encoding', 'identity').strip().lower()
+            if compressed and encoding != 'zstd':
+                raise CompressionRequired('zstandard_required')
+            if not compressed and encoding != 'identity':
+                raise ValueError('unsupported_model_encoding')
+            wire_limit = limit + MAX_FRAME_OVERHEAD if compressed else limit
+            try:
+                length = int(response.getheader('Content-Length', '-1'))
+            except ValueError as error:
+                if compressed:
+                    raise CompressionRequired('invalid_compressed_model_length') from error
+                raise
+            if response.getheader('Transfer-Encoding') or length not in range(wire_limit + 1):
+                if compressed:
+                    raise CompressionRequired('unbounded_compressed_model_response')
                 raise ValueError('unbounded_model_response')
+            # Keep the socket reference: HTTP/1.0 detaches it from connection.
             body = bytearray()
-            while True:
-                if self.cancelled() or time.monotonic() >= deadline:
-                    raise InterruptedError('model_download_cancelled')
-                chunk = response.read1(min(65536, limit + 1 - len(body)))
+            while len(body) < length:
+                wait = timeout()
+                sock.settimeout(wait)
+                chunk = response.read1(min(65536, length - len(body)))
                 if not chunk:
                     break
                 body.extend(chunk)
-                if len(body) > limit:
+                if len(body) > wire_limit:
                     break
-            if len(body) > limit:
+            if len(body) > wire_limit:
                 raise ValueError('model_response_too_large')
-            return bytes(body)
+            if len(body) != length:
+                raise OSError('incomplete_model_response')
+            timeout()  # Include decoding in the request's cancellation/deadline checks.
+            try:
+                body = decode_model_chunk(body, limit) if compressed else bytes(body)
+            except ValueError as error:
+                raise CompressionRequired('invalid_compressed_model_chunk') from error
+            timeout()
+            reusable = not response.will_close and connection.sock is not None
+            return body
+        except Exception as error:
+            if self._last_error is None:
+                detail = {'type': type(error).__name__}
+                status = re.fullmatch(r'model_server_status_([0-9]{3})', str(error))
+                if status:
+                    detail['http_status'] = int(status[1])
+                elif str(error) in ('incomplete_model_response', 'incomplete_model_chunk'):
+                    detail['code'] = str(error)
+                self._last_error = detail  # Never store raw exceptions, URLs or authentication.
+            if expired.is_set():
+                raise InterruptedError('model_download_cancelled') from error
+            raise
         finally:
-            connection.close()
+            finished.set()
+            watchdog.join()  # Never let a late watchdog close a pooled/reassigned socket.
+            if response is not None:
+                response.close()
+            if connection is not None and (pool is None or not reusable or expired.is_set()):
+                connection.close()
+                connection = None
+            if pool is not None:
+                pool.put(connection)
+
+    def require_compression(self):
+        """Small authenticated probe, also required for cached challengers."""
+        target = f'/v1/models/{self.submission.model_id}/files/0?offset=0&length=1'
+        self.get(target, 1, compressed=True)
 
     def manifest(self):
         value = json.loads(self.get(f'/v1/models/{self.submission.model_id}/manifest', MAX_MANIFEST_BYTES))
@@ -267,6 +382,48 @@ class ModelClient:
 
     def download(self, cache: Path, *, cancelled=lambda: False, accepted_architectures=None,
                  cache_key=None) -> tuple[Path, dict]:
+        """Two bounded, reusable connections; only contiguous bytes reach .part."""
+        if self._connections is not None:
+            raise RuntimeError('model_download_already_running')
+        self._last_error = None
+        with DownloadBudget(cache.parent / 'download-budgets', cache_key or self.submission.model_id) as budget:
+            remaining = self.remaining_s
+            self.remaining_s = lambda: min(remaining(), budget.remaining_s())
+            try:
+                return self._download_turn(cache, cancelled, accepted_architectures, cache_key)
+            except Exception as error:
+                try:
+                    write_private(budget.path.with_suffix('.error.json'),
+                                  {'unix': time.time(), **(self._last_error or {'type': type(error).__name__})})
+                except OSError:
+                    pass  # Diagnostics must not replace the original acquisition failure.
+                if budget.exhausted():
+                    raise DownloadBudgetExceeded('model_download_time_budget_exhausted') from error
+                raise
+            finally:
+                self.remaining_s = remaining
+
+    def _download_turn(self, cache, cancelled, accepted_architectures, cache_key):
+        original_cancelled = self.cancelled
+        aborted = threading.Event()
+        self.cancelled = lambda: aborted.is_set() or original_cancelled() or cancelled()
+        self._connections = LifoQueue(DOWNLOAD_CONNECTIONS)
+        for _ in range(DOWNLOAD_CONNECTIONS):
+            self._connections.put(None)
+        workers = ThreadPoolExecutor(max_workers=DOWNLOAD_CONNECTIONS, thread_name_prefix='model-download')
+        try:
+            return self._download(cache, workers, accepted_architectures, cache_key)
+        finally:
+            aborted.set()
+            workers.shutdown(wait=True, cancel_futures=True)
+            while not self._connections.empty():
+                connection = self._connections.get_nowait()
+                if connection is not None:
+                    connection.close()
+            self._connections = None
+            self.cancelled = original_cancelled
+
+    def _download(self, cache, workers, accepted_architectures, cache_key):
         manifest = self.manifest()
         if accepted_architectures is not None and manifest['arch'] not in accepted_architectures:
             raise NotImplementedError('architecture_not_enabled')
@@ -295,11 +452,18 @@ class ModelClient:
                 raise OSError('insufficient_model_cache_space')
             with part.open('ab') as stream:
                 os.chmod(part, 0o600)
+                pending = deque()
+                requested = offset
                 while offset < row['size']:
-                    if cancelled():
+                    if self.cancelled():
                         raise InterruptedError('window_closed')
-                    length = min(CHUNK, row['size'] - offset)
-                    body = self.get(f'/v1/models/{self.submission.model_id}/files/{index}?offset={offset}&length={length}', length)
+                    while len(pending) < DOWNLOAD_CONNECTIONS and requested < row['size']:
+                        length = min(CHUNK, row['size'] - requested)
+                        target_url = f'/v1/models/{self.submission.model_id}/files/{index}?offset={requested}&length={length}'
+                        pending.append((length, workers.submit(self.get, target_url, length, compressed=True)))
+                        requested += length
+                    length, future = pending.popleft()
+                    body = future.result()
                     if len(body) != length:
                         raise OSError('incomplete_model_chunk')
                     stream.write(body)

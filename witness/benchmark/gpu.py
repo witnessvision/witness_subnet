@@ -62,6 +62,17 @@ class Gpu:
     def lease(self):
         return nullcontext()
 
+    @staticmethod
+    def checked_result(command, result):
+        # The model supervisor reports generic preprocessing exceptions as
+        # invalid answers. Host decoder exhaustion is infrastructure instead.
+        if any(str(arg).endswith('/pod_runtime.py') or arg == 'pod_runtime.py' for arg in command):
+            stderr = result.stderr or ''
+            if ('Resource temporarily unavailable' in stderr
+                    and ('video_reader_backend' in stderr or '[swscaler]' in stderr)):
+                raise InfrastructureError('gpu_video_decoder_resource_exhausted')
+        return result
+
 
 class LocalGpu(Gpu):
     def __init__(self, config: dict, root: Path):
@@ -92,9 +103,10 @@ class LocalGpu(Gpu):
 
     def run(self, command: list[str], *, timeout: float, stdin: str | None = None) -> subprocess.CompletedProcess:
         from .execution import run_process
-        return run_process(command, input=stdin, text=True, timeout=timeout,
-                           cancelled=self.cancelled, remaining_s=self.remaining_s,
-                           env={**os.environ, 'WITNESS_GPU_WORKSPACE': self.workspace})
+        result = run_process(command, input=stdin, text=True, timeout=timeout,
+                             cancelled=self.cancelled, remaining_s=self.remaining_s,
+                             env={**os.environ, 'WITNESS_GPU_WORKSPACE': self.workspace})
+        return self.checked_result(command, result)
 
     def put(self, sources: list[Path], destination: str) -> None:
         for source in sources:
@@ -116,6 +128,10 @@ class LocalGpu(Gpu):
     def read(self, path: str) -> str:
         return Path(path).read_text() if Path(path).exists() else ""
 
+    def remove_models(self, models: list[str]) -> list[str]:
+        from .model_cache import remove_models
+        return remove_models(Path(self.workspace) / 'models', models)
+
 
 class SshGpu(Gpu):
     def __init__(self, config: dict, root: Path):
@@ -136,8 +152,9 @@ class SshGpu(Gpu):
     def run(self, command: list[str], *, timeout: float, stdin: str | None = None) -> subprocess.CompletedProcess:
         host, port = self.address
         remote = f"WITNESS_GPU_WORKSPACE={shlex.quote(self.workspace)} " + " ".join(map(shlex.quote, command))
-        return subprocess.run(["ssh", *self._options(), "-p", str(port), f"root@{host}", remote],
-                              input=stdin, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(["ssh", *self._options(), "-p", str(port), f"root@{host}", remote],
+                                input=stdin, capture_output=True, text=True, timeout=timeout)
+        return self.checked_result(command, result)
 
     def put(self, sources: list[Path], destination: str) -> None:
         host, port = self.address
@@ -149,6 +166,15 @@ class SshGpu(Gpu):
     def read(self, path: str) -> str:
         result = self.run(["cat", path], timeout=120)
         return result.stdout if result.returncode == 0 else ""
+
+    def remove_models(self, models: list[str]) -> list[str]:
+        # The helper needs only stdlib; do not install packages or start a GPU.
+        source = Path(__file__).with_name('model_cache.py').read_text()
+        result = self.run(['python3', '-', str(Path(self.workspace) / 'models'), *models],
+                          stdin=source, timeout=30)
+        if result.returncode:
+            raise InfrastructureError('gpu_model_cleanup_failed')
+        return json.loads(result.stdout)
 
 
 class RunPodGpu(SshGpu):
@@ -164,6 +190,12 @@ class RunPodGpu(SshGpu):
 
     def _save(self) -> None:
         write_private(self.state_path, self.state)
+
+    def remove_models(self, models: list[str]) -> list[str]:
+        if not self.state.get('running_since') or not self.state.get('host'):
+            raise InfrastructureError('gpu_model_cleanup_waiting_for_running_host')
+        self.address = (self.state['host'], int(self.state['port']))
+        return super().remove_models(models)
 
     def _rest(self, method: str, path: str, body: dict | None = None):
         response = httpx.request(method, self.REST + path, json=body, timeout=60,
