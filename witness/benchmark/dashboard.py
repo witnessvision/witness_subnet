@@ -61,11 +61,15 @@ def merge(sources):
                            'progress': state.get('progress'),
                            'used_count': sum(r.get('usage') == 'consumed' for r in rows),
                            'reserved_count': sum(r.get('usage') == 'reserved' for r in rows)})
-        queues[hotkey] = sorted([{k: r.get(k) for k in ('hotkey', 'coldkey', 'model_id', 'block', 'position',
+        queues[hotkey] = sorted([{k: r.get(k) for k in ('uid', 'hotkey', 'coldkey', 'model_id', 'block', 'position',
                                                        'status', 'reason', 'usage', 'window_id')}
                                  for r in rows if r.get('usage') == 'reserved'],
                                 key=lambda r: (r['position'] is None, r['position'] or 0, r['block']))
-        evaluations += state.get('evaluations', [])
+        # Display the UID bound to this exact submission, never infer it from
+        # queue position or match a different model belonging to the same key.
+        submission_uids = {(r.get('hotkey'), r.get('model_id')): r.get('uid') for r in rows}
+        evaluations += [{**r, 'uid': r.get('uid', submission_uids.get((r.get('hotkey'), r.get('model_id'))))}
+                        for r in state.get('evaluations', [])]
     return {'schema_version': 'witness-dashboard-2', 'is_demo': False, 'block': authority.get('block'),
             'policy_hash': authority.get('policy_hash'), 'window': authority.get('window'),
             'king': authority.get('king'), 'weights': authority.get('weights', {}),
@@ -101,7 +105,7 @@ class Projection:
         if state not in ('consumed', 'reserved') or not 1 <= page <= 1_000_000 or len(q) > 128:
             raise ValueError('invalid_hotkey_query')
         _, status = self.source(validator)
-        rows = [{k: r.get(k) for k in ('hotkey', 'coldkey', 'model_id', 'status', 'reason', 'window_id')}
+        rows = [{k: r.get(k) for k in ('uid', 'hotkey', 'coldkey', 'model_id', 'status', 'reason', 'window_id')}
                 for r in status.get('triggers', []) if r.get('usage') == state
                 and any(q.casefold() in str(r.get(k, '')).casefold() for k in ('hotkey', 'coldkey', 'model_id'))]
         return {'total': len(rows), 'page': page, 'page_size': 50, 'rows': rows[(page-1)*50:page*50]}

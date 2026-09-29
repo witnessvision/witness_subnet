@@ -11,15 +11,17 @@
     return node;
   };
   const known = (v) => v !== null && v !== undefined;
+  const finite = (n) => typeof n === "number" && Number.isFinite(n);
   const integer = (n) => known(n) && Number.isFinite(n) ? new Intl.NumberFormat("en-US").format(n) : "Unknown";
   const decimal = (n, digits = 3) => known(n) && Number.isFinite(n) ? n.toFixed(digits) : "—";
   const stake = (n) => known(n) && Number.isFinite(n) ? new Intl.NumberFormat("en-US", {maximumFractionDigits: 2}).format(n) : "Unknown";
   const short = (s) => s.length > 18 ? `${s.slice(0, 8)}…${s.slice(-6)}` : s;
-  const finite = (n) => typeof n === "number" && Number.isFinite(n);
   const list = (v) => Array.isArray(v) ? v : [];
   const pct = (f) => finite(f) ? `${Math.round(f * 1000) / 10}%` : "?";
   const clock = (ms) => new Date(ms).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
   const age = (s) => s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h`;
+  const plural = (n, word) => `${integer(n)} ${word}${n === 1 ? "" : "s"}`;
+  const clamp = (x) => Math.max(0, Math.min(1, x));
   const unknown = (text = "Unknown") => el("span", text, "sn-unknown");
 
   async function read(path) {
@@ -60,9 +62,18 @@
     return wrap;
   }
 
+  // A UID is shown only when the backend supplies it for this exact row; it is never looked up from a hotkey.
+  function who(uid, value, label) {
+    if (!finite(uid)) return ident(value, label);
+    const box = el("span", null, "sn-who");
+    box.append(el("strong", `UID ${uid}`, "sn-uid"), ident(value, label));
+    return box;
+  }
+
   const TONES = {
     good: ["fresh", "applied", "consumed", "evaluated", "done", "complete", "completed", "closed", "success", "finalized", "included", "won"],
-    warn: ["stale", "reserved", "queued", "pending", "waiting", "running", "retry", "open", "submitted", "evaluating"],
+    warn: ["stale", "reserved", "queued", "pending", "waiting", "retry", "open", "evaluating"],
+    live: ["running"],
     bad: ["unreachable", "failed", "error", "rejected", "invalid", "expired", "lost", "timeout"],
   };
   function badge(value) {
@@ -93,6 +104,7 @@
     waiting: ["Waiting", "sn-neutral"], preparing: ["Preparing batch", "sn-live"], downloading: ["Downloading weights", "sn-live"],
     evaluating: ["Running clips", "sn-live"], judging: ["Scoring claims", "sn-live"], deferred: ["Deferred", "sn-warn"],
   };
+  const WORKING = ["preparing", "downloading", "evaluating", "judging"];
   function stageBadge(stage) {
     if (!known(stage) || stage === "") return unknown();
     const [label, tone] = STAGES[stage] || [String(stage), "sn-neutral"];
@@ -132,12 +144,95 @@
   function evalStatus(value) {
     return value === "early_stop" ? el("span", "Early stop", "sn-badge sn-warn") : badge(value);
   }
-  function score(value, upper) {
-    if (known(value) || !known(upper)) return decimal(value);
-    const box = el("span", null, "sn-stack");
-    box.title = "Upper bound from an early stop, not a measured score";
-    box.append(el("span", `≤ ${decimal(upper)}`), el("small", "upper bound", "sn-muted"));
+
+  // Score with a 0–1 bar. An upper bound keeps its "≤" and a hollow bar; a missing score stays unknown, never zero.
+  function meter(value, upper, digits = 4) {
+    const measured = finite(value);
+    const bound = !measured && finite(upper);
+    const box = el("span", null, bound ? "sn-meter sn-meter-upper" : "sn-meter");
+    if (!measured && !bound) {
+      box.append(unknown("—"));
+      box.title = "Not reported";
+      return box;
+    }
+    const shown = measured ? value : upper;
+    const bar = el("span", null, "sn-meter-bar");
+    bar.setAttribute("aria-hidden", "true");
+    const fill = el("i");
+    fill.style.width = `${clamp(shown) * 100}%`;
+    bar.append(fill);
+    box.append(el("span", `${bound ? "≤ " : ""}${decimal(shown, digits)}`, "sn-meter-num"), bar);
+    if (bound) {
+      box.title = "Upper bound from an early stop, not a measured score";
+      box.append(el("small", "upper bound", "sn-muted"));
+    }
     return box;
+  }
+
+  // Queue reasons as the evaluator records them: exception class names or policy codes.
+  // The original code always stays visible next to the translation.
+  const REASONS = {
+    ConnectionRefusedError: ["Miner unreachable", "bad", "The evaluator could not connect to the miner serving this model. Retried later; nothing was scored."],
+    ValueError: ["Preparation failed", "bad", "The evaluator could not prepare this model for the batch. Retried later. The model is not marked invalid and the hotkey is not consumed."],
+    TimeoutError: ["Timed out", "bad", "An evaluation step exceeded its time limit. Retried later."],
+    InterruptedError: ["Interrupted", "warn", "The attempt stopped before finishing. Retried later."],
+    DownloadBudgetExceeded: ["Download budget exhausted", "warn", "The model download exceeded its time budget. Parked without a result or hotkey use."],
+    compression_required: ["Zstandard required", "warn", "The model must use Zstandard transport before it can be evaluated. Held without consuming the hotkey."],
+    compression_ready: ["Zstandard ready", "neutral", "Zstandard transport detected; back in the queue."],
+    eligible_in_next_window: ["Awaiting next window", "neutral", "Not a candidate in the current window. Eligible when the next window opens."],
+    retry_after_restart: ["Retry after restart", "neutral", "Interrupted by an evaluator restart; retried without waiting."],
+    window_closed_before_publication: ["Window closed first", "warn", "The window closed before the result was published. Retried later."],
+    p2p_resubmission_required: ["Resubmission required", "warn", "Legacy submission. The miner must resubmit to be evaluated."],
+  };
+  function reasonInfo(reason) {
+    if (!known(reason) || reason === "") return null;
+    const raw = String(reason);
+    if (Object.hasOwn(REASONS, raw)) {
+      const [label, tone, text] = REASONS[raw];
+      return {raw, label, tone, text};
+    }
+    if (/(Error|Exception)$/.test(raw)) return {raw, label: raw, tone: "bad", text: "The last attempt raised this error. The evaluator retries later."};
+    return {raw, label: raw, tone: "neutral", text: null};
+  }
+  function reasonCell(reason) {
+    const info = reasonInfo(reason);
+    if (!info) return el("span", "—", "sn-muted");
+    const box = el("span", null, "sn-reason");
+    const top = el("span", null, "sn-reason-top");
+    top.append(el("strong", info.label, `sn-${info.tone}`));
+    if (info.label !== info.raw) top.append(el("code", info.raw, "sn-raw"));
+    box.append(top);
+    if (info.text) box.append(el("small", info.text));
+    return box;
+  }
+
+  // Counts of backend-reported fields only; order and eligibility stay the backend's.
+  function queueSummary(queue) {
+    const reasons = new Map();
+    let inLine = 0, running = 0, blocked = 0;
+    for (const row of queue) {
+      if (finite(row.position)) inLine++;
+      if (row.status === "running") running++;
+      const info = reasonInfo(row.reason);
+      if (!info) continue;
+      if (info.tone === "bad") blocked++;
+      const entry = reasons.get(info.label) || {tone: info.tone, n: 0, raw: info.raw};
+      entry.n++;
+      reasons.set(info.label, entry);
+    }
+    const chips = el("ul", null, "sn-qsum");
+    chips.setAttribute("aria-label", "Queue summary");
+    const add = (n, text, tone, title) => {
+      const li = el("li", null, `sn-qchip sn-${tone}`);
+      li.append(el("strong", integer(n)), el("span", ` ${text}`));
+      if (title) li.title = title;
+      chips.append(li);
+    };
+    add(queue.length, "reserved", "neutral");
+    if (inLine) add(inLine, "in line this window", "neutral");
+    if (running) add(running, "running", "live");
+    for (const [label, entry] of reasons) add(entry.n, label, entry.tone, entry.raw);
+    return {chips, inLine, running, blocked, nextWindow: reasons.get(REASONS.eligible_in_next_window[0])?.n || 0};
   }
 
   function node(value) { return value instanceof Node ? value : el("span", value); }
@@ -201,6 +296,7 @@
   }
 
   const state = {data: null, validator: null, hotkeys: {state: "consumed", q: "", page: 1, seq: 0}, loading: false, fetchedAt: null, failed: false};
+  const openWindowId = (data) => data?.window && data.window.state === "open" ? data.window.id : null;
 
   // ---------- Overview ----------
   function renderChain(data) {
@@ -218,7 +314,7 @@
     add("Window", w ? `${w.id ?? "?"} · ${w.state ?? "unknown"}` : unknown());
     const validators = list(data.validators);
     const fresh = validators.filter((v) => v.freshness === "fresh").length;
-    add("Fresh", validators.length ? el("span", `${fresh} of ${validators.length} reporting`, fresh === validators.length ? "sn-ok" : "sn-warn") : unknown("None reporting"));
+    add("Chain view", validators.length ? el("span", `${fresh} of ${validators.length} fresh`, fresh === validators.length ? "sn-ok" : "sn-warn") : unknown("None reporting"));
     add("Policy", known(data.policy_hash) ? ident(data.policy_hash, "policy hash") : unknown());
     $("#demo-banner").hidden = data.is_demo !== true;
     document.body.classList.toggle("sn-is-demo", data.is_demo === true);
@@ -244,19 +340,21 @@
     $("#stale-text").textContent = reasons.join(" ");
   }
 
+  // Source read errors belong to this dashboard's plumbing, not to any evaluation or queue retry.
   function renderErrors(errors) {
     const target = $("#errors");
     target.replaceChildren();
     if (!Array.isArray(errors) || !errors.length) return;
     const box = el("div", null, "sn-warnings");
-    box.append(el("strong", `${errors.length} source${errors.length === 1 ? "" : "s"} reported an error`));
-    const list = el("ul");
+    box.append(el("strong", `Dashboard could not read ${plural(errors.length, "status source")}`),
+      el("p", "Read errors between this dashboard and its configured sources. They are not evaluation results or queue retry reasons.", "sn-muted sn-small"));
+    const items = el("ul");
     for (const item of errors) {
       const li = el("li");
       li.append(el("code", item.source ?? "unknown source"), el("span", ` ${item.error ?? "unknown error"}`));
-      list.append(li);
+      items.append(li);
     }
-    box.append(list);
+    box.append(items);
     target.append(box);
   }
 
@@ -295,18 +393,77 @@
     return box;
   }
 
-  function renderCrown(king, intended, authority) {
+  // The king's own latest published result: exact model ID only, measured before upper bound, newest window first.
+  function kingResult(data) {
+    const model = data.king?.model_id;
+    if (!known(model)) return null;
+    const newest = (rows) => rows.reduce((best, e) => !best || e.window_id > best.window_id ? e : best, null);
+    const rows = list(data.evaluations).filter((e) => e.model_id === model && finite(e.window_id));
+    const measured = newest(rows.filter((e) => finite(e.quality)));
+    const latest = newest(rows);
+    return latest && {row: measured || latest, measured: Boolean(measured), newer: measured && latest.window_id > measured.window_id ? latest : null};
+  }
+
+  function reportButton(evaluation, text, cls = "sn-link") {
+    const button = el("button", text, cls);
+    button.type = "button";
+    button.dataset.action = "detail";
+    button.setAttribute("aria-haspopup", "dialog");
+    button.onclick = () => openDetail(evaluation, button);
+    return button;
+  }
+
+  function kingResultBlock(data) {
+    const box = el("div", null, "sn-king-result");
+    const found = kingResult(data);
+    if (!found) {
+      box.append(el("p", "LATEST RESULT", "sn-eyebrow"), el("p", "No published result for this exact model yet.", "sn-muted sn-small"));
+      return box;
+    }
+    const e = found.row;
+    const open = openWindowId(data);
+    const head = el("div", null, "sn-kr-head");
+    head.append(el("p", `${found.measured ? "LATEST MEASURED RESULT" : "LATEST RESULT"} · WINDOW ${e.window_id}`, "sn-eyebrow"));
+    if (e.status && e.status !== "done") head.append(evalStatus(e.status));
+    head.append(e.available ? el("span", "Closed", "sn-badge sn-good") : e.window_id === open ? el("span", "Window open", "sn-badge sn-warn") : el("span", "Report unavailable", "sn-badge sn-neutral"));
+    const nums = el("dl", null, "sn-kr-nums");
+    for (const [label, value, upper] of [["Quality", e.quality, e.quality_upper], ["Reward", e.reward, e.reward_upper]]) {
+      const row = el("div");
+      const dd = el("dd");
+      dd.append(meter(value, upper));
+      row.append(el("dt", label), dd);
+      nums.append(row);
+    }
+    const foot = el("div", null, "sn-kr-foot");
+    const by = el("span", null, "sn-kr-by");
+    by.append(el("span", "Evaluator "), who(list(data.validators).find((v) => v.hotkey === e.validator)?.uid, e.validator, "evaluator hotkey"));
+    foot.append(by, e.available ? reportButton(e, `Open window ${e.window_id} report`, "sn-btn sn-btn-accent") : el("span", e.window_id === open ? "Clips open after the window closes." : "Report not available.", "sn-muted sn-small"));
+    box.append(head, nums, foot);
+    if (found.newer) box.append(el("p", `Window ${found.newer.window_id} has a newer result without a measured score (${found.newer.status ?? "status unknown"}); see Results.`, "sn-note"));
+    return box;
+  }
+
+  function renderCrown(data) {
+    const king = data.king;
+    const intended = data.weights?.intended;
     const title = el("div", null, "sn-card-title");
     const body = [];
-    if (!authority && !king) {
+    if (!known(data.block) && !king) {
       // Without the authoritative chain projection, "no king" would be a guess.
       title.append(unknown("King unknown"));
       body.push(el("p", "The authoritative chain source is unavailable. King, burn and weights stay unknown until it answers.", "sn-lede"));
       return card("KING", title, body, el("span", "Unknown", "sn-badge sn-neutral"), "sn-crown");
     }
     if (king) {
-      title.append(ident(king.hotkey, "king hotkey"));
-      body.push(facts([["Coldkey", ident(king.coldkey, "king coldkey")], ["Model", ident(king.model_id, "king model id")], ["UID", known(intended?.king_uid) ? String(intended.king_uid) : unknown()]]));
+      const uid = finite(king.uid) ? king.uid : intended?.king_uid;
+      const pairs = [["Coldkey", ident(king.coldkey, "king coldkey")], ["Model", ident(king.model_id, "king model id")]];
+      if (finite(uid)) {
+        title.append(el("span", `UID ${uid}`, "sn-king-uid"));
+        pairs.unshift(["Hotkey", ident(king.hotkey, "king hotkey")]);
+      } else {
+        title.append(ident(king.hotkey, "king hotkey"));
+      }
+      body.push(facts(pairs), kingResultBlock(data));
     } else {
       title.append(el("span", "No king yet"));
       const burn = finite(intended?.burn_fraction) ? `${pct(intended.burn_fraction)} of the weight burns` : "Weight burns";
@@ -314,21 +471,34 @@
       body.push(el("p", `${burn} to ${uid} until the chain crowns a first king. The first king comes from a bootstrap pair, so the subnet waits for two valid submissions evaluated on the same batch.`, "sn-lede"));
     }
     body.push(el("p", "WEIGHT SPLIT · INTENDED", "sn-eyebrow sn-sub-eyebrow"), splitBar(intended));
-    body.push(el("p", "The king is read from finalized chain consensus only. With a king, 30% goes to the king and 70% burns; without one, 100% burns.", "sn-note"));
+    body.push(el("p", "Read from finalized chain consensus, never inferred from scores.", "sn-note"));
     const status = king ? el("span", "Crowned", "sn-badge sn-good") : el("span", "No king · burning", "sn-badge sn-warn");
     return card("KING", title, body, status, "sn-crown");
+  }
+
+  // Submission receipts: "submitted" proves only that the extrinsic was sent, not that weights applied.
+  const SUBMITTED = {
+    submitted: ["Submitted · unconfirmed", "sn-warn"], submitting: ["Submitting", "sn-live"], applied: ["Applied", "sn-good"],
+    rejected: ["Rejected", "sn-bad"], unknown: ["Outcome unknown", "sn-warn"],
+  };
+  function submittedBadge(status) {
+    if (!known(status) || status === "") return unknown();
+    const [label, tone] = SUBMITTED[status] || [String(status), "sn-neutral"];
+    const node = el("span", label, `sn-badge ${tone}`);
+    node.title = `Recorded status: ${status}`;
+    return node;
   }
 
   function renderWeights(weights) {
     const {decision, intended, submitted, applied} = weights;
     const steps = el("ol", null, "sn-steps");
-    const step = (label, item, hint, fill, extra) => {
+    const step = (label, item, hint, fill, extra, missing = "None reported") => {
       const li = el("li", null, item ? "" : "sn-step-missing");
       const top = el("div", null, "sn-step-top");
       top.append(el("strong", label));
       if (extra) top.append(...extra.filter(Boolean));
       li.append(top);
-      if (item) fill(li); else li.append(unknown(label === "Applied" ? "Not observed on finalized chain" : "None reported"));
+      if (item) fill(li); else li.append(unknown(missing));
       li.append(el("small", hint, "sn-step-hint"));
       steps.append(li);
     };
@@ -339,17 +509,18 @@
     });
     step("Intended", intended, "Vector this validator intends to set", (li) => li.append(vector(intended.uids, intended.weights)),
       [intended ? badge(intended.source) : null]);
-    step("Submitted", submitted, "set_weights extrinsic sent; not proof that weights applied", (li) => {
+    step("Submitted", submitted, "A submission does not prove the weights applied; commit/reveal can delay application", (li) => {
       if (Array.isArray(submitted.uids)) li.append(vector(submitted.uids, submitted.weights));
       li.append(el("small", `Block ${integer(submitted.block)}`));
       if (known(submitted.receipt)) li.append(responseBlock("Receipt", submitted.receipt));
-    }, [submitted ? badge(submitted.status) : null,
+    }, [submitted ? submittedBadge(submitted.status) : null,
       submitted && intended && Array.isArray(submitted.uids) && !sameVector(submitted, intended) ? el("span", "differs from intended", "sn-badge sn-warn") : null]);
-    step("Applied", applied, "Observed in finalized chain state; commit/reveal can delay it after submission", (li) => {
+    step("Applied", applied, "Observed in finalized chain state. Until then it is unconfirmed, not zero", (li) => {
       if (known(applied.hotkey)) li.append(ident(applied.hotkey, "applied king hotkey"));
       li.append(vector(applied.uids, applied.weights), el("small", `Block ${integer(applied.block)}`));
-    }, [applied && intended ? (sameVector(applied, intended) ? el("span", "matches intended", "sn-badge sn-good") : el("span", "differs from intended", "sn-badge sn-warn")) : null]);
-    return card("WEIGHTS · DECISION → APPLIED", null, [steps], null, "sn-card-wide");
+    }, [applied && intended ? (sameVector(applied, intended) ? el("span", "matches intended", "sn-badge sn-good") : el("span", "differs from intended", "sn-badge sn-warn")) : null],
+    "Unconfirmed · not observed on finalized chain");
+    return card("WEIGHTS · DECISION → APPLIED", null, [steps], null, "sn-card-wide sn-weights");
   }
 
   function modelRole(modelId, king) {
@@ -358,58 +529,87 @@
     return king ? "Challenger" : "Bootstrap candidate";
   }
 
-  function liveTile(v, data) {
+  // One sentence that separates work from chain freshness and queue trouble; a waiting evaluator with blocked rows is not "fine".
+  function headline(p, queue, summary) {
+    if (!p) return ["No telemetry", "neutral", "This validator publishes no progress, so what it is doing is unknown."];
+    if (WORKING.includes(p.stage)) return [`Working · ${STAGES[p.stage][0]}`, "live", `${modelRole(p.model_id, state.data?.king)} in window ${p.window_id ?? "?"}.`];
+    if (p.stage === "deferred") return ["Last attempt deferred", "warn", "Telemetry reports an infrastructure deferral; the challenge is retried later, never scored as zero."];
+    if (p.stage !== "waiting") return [String(p.stage ?? "Unknown stage"), "neutral", "Stage reported by the evaluator as is."];
+    if (!summary) return ["Waiting", "neutral", "Telemetry reports no evaluation in progress. The queue is not reported."];
+    if (summary.blocked) return ["Waiting · queue held by errors", "bad", `${summary.blocked} of ${plural(queue.length, "reserved challenge")} held by retry errors. Telemetry reports no evaluation in progress.`];
+    if (!queue.length) return ["Waiting · queue empty", "neutral", "No reserved challenge for this evaluator."];
+    if (summary.nextWindow === queue.length) return ["Waiting for next window", "neutral", "Every reserved challenge becomes eligible when the next window opens."];
+    return ["Waiting", "neutral", "Telemetry reports no evaluation in progress."];
+  }
+
+  function nowTile(v, data) {
     const p = v.progress;
-    const tile = el("div", null, "sn-live-tile");
-    const top = el("div", null, "sn-live-top");
-    top.append(ident(v.hotkey, "validator hotkey"), badge(v.freshness));
-    tile.append(top);
     const queue = data.queues ? data.queues[v.hotkey] : undefined;
-    const queueText = Array.isArray(queue) ? `${integer(queue.length)} in queue` : "Queue unknown";
-    if (!p) {
-      tile.append(el("div", null, "sn-live-stage"));
-      tile.lastChild.append(unknown("No progress reported"));
-      tile.append(el("p", "State unknown until this validator publishes telemetry.", "sn-muted sn-small"));
-    } else {
-      const stage = el("div", null, "sn-live-stage");
-      stage.append(stageBadge(p.stage), el("span", known(p.window_id) ? `Window ${p.window_id}` : "Window unknown", "sn-muted"));
-      const model = el("div", null, "sn-live-model");
-      model.append(el("span", modelRole(p.model_id, data.king), "sn-role"));
-      if (known(p.model_id)) model.append(ident(p.model_id, "model id"));
-      tile.append(stage, model, clipProgress(p.completed_clips, p.total_clips));
+    const summary = Array.isArray(queue) ? queueSummary(queue) : null;
+    const tile = el("article", null, "sn-now");
+    const head = el("div", null, "sn-now-head");
+    head.append(who(v.uid, v.hotkey, "validator hotkey"), el("span", v.mode ?? "unknown mode", "sn-muted sn-small"));
+    let [title, tone, detail] = headline(p, queue, summary);
+    // Old telemetry or a stale chain view says what was last reported, not what happens now.
+    if (p && (v.freshness !== "fresh" || !finite(p.updated_unix) || Date.now() / 1000 - p.updated_unix > 120)) {
+      [title, tone, detail] = ["Current activity unknown", "warn", `Telemetry or chain view is stale. Last report: ${title}.`];
     }
-    const foot = el("div", null, "sn-live-foot");
-    foot.append(p ? since(p.updated_unix, "Updated ") : el("span", v.mode ?? "unknown mode"), el("span", queueText));
-    tile.append(foot);
+    tile.append(head, el("p", title, `sn-now-title sn-${tone}`), el("p", detail, "sn-now-detail"));
+    const signals = el("dl", null, "sn-signals");
+    const signal = (label, ...parts) => {
+      const row = el("div");
+      const dd = el("dd");
+      dd.append(...parts);
+      row.append(el("dt", label), dd);
+      signals.append(row);
+    };
+    signal("Chain", badge(v.freshness), el("span", `block ${integer(v.block)}`, "sn-muted sn-small sn-mono"));
+    if (p) {
+      const work = [stageBadge(p.stage), el("span", known(p.window_id) ? `window ${p.window_id}` : "window unknown", "sn-muted sn-small sn-mono")];
+      if (known(p.model_id)) {
+        const model = el("span", null, "sn-inline");
+        model.append(el("span", modelRole(p.model_id, data.king), "sn-role"), ident(p.model_id, "model id"));
+        work.push(model);
+      }
+      if (WORKING.includes(p.stage)) work.push(clipProgress(p.completed_clips, p.total_clips));
+      work.push(since(p.updated_unix, "telemetry "));
+      signal("Work", ...work);
+    } else {
+      signal("Work", unknown("No progress reported"));
+    }
+    signal("Queue", summary ? summary.chips : unknown("Queue not reported"));
+    tile.append(signals);
     return tile;
   }
 
-  function renderLive(data) {
+  function renderNow(data) {
     const validators = list(data.validators).filter((v) => v.mode === "evaluator" || known(v.progress));
-    const grid = el("div", null, "sn-live-grid");
-    if (!validators.length) grid.append(empty("No evaluator telemetry", "No validator publishes progress to this dashboard. Telemetry is opt-in, so this says nothing about evaluations or commitments on chain."));
-    for (const v of validators) grid.append(liveTile(v, data));
-    const note = el("p", "Signed validator telemetry, shown for display only. It never decides the king or the weights. Open-window clips stay hidden until the window closes.", "sn-note");
-    return card("EVALUATION NOW · TELEMETRY", null, [grid, note], null, "sn-card-wide");
+    const box = el("div", null, "sn-now-list");
+    if (!validators.length) box.append(empty("No evaluator telemetry", "No validator publishes progress to this dashboard. Telemetry is opt-in, so this says nothing about evaluations or commitments on chain."));
+    for (const v of validators) box.append(nowTile(v, data));
+    const note = el("p", "Signed telemetry, display only. It never decides the king or the weights.", "sn-note");
+    return card("EVALUATION NOW", null, [box, note], null, "sn-now-card");
   }
 
-  function renderOverview(data) {
-    const target = $("#overview-body");
-    target.replaceChildren();
-    const weights = data.weights || {};
-    target.append(renderCrown(data.king, weights.intended, known(data.block)));
-
+  function renderWindow(data) {
     const w = data.window;
-    const windowTitle = el("div", null, "sn-card-title");
-    windowTitle.append(el("span", w ? `Window ${w.id}` : "No window reported"));
-    const windowBody = w ? [facts([
+    const title = el("div", null, "sn-card-title");
+    title.append(el("span", w ? `Window ${w.id ?? "?"}` : "No window reported"));
+    const body = w ? [facts([
       ["Epochs", known(w.start_epoch) ? `${w.start_epoch} – ${known(w.end_epoch) ? w.end_epoch : "?"}` : "Unknown"],
       ["Start block", integer(w.start_block)],
       ["End block", known(w.end_block) ? integer(w.end_block) : el("span", "Pending finalization", "sn-unknown")],
     ])] : [el("p", "No evaluation window is reported.", "sn-note")];
-    if (w && w.state === "open") windowBody.push(el("p", "Clip detail for this window is hidden until it closes.", "sn-note"));
-    target.append(card("WINDOW · 2 EPOCHS", windowTitle, windowBody, w ? badge(w.state) : null));
-    target.append(renderWeights(weights), renderLive(data));
+    if (w && w.state === "open") body.push(el("p", "Clip detail for this window stays hidden until it closes. Closed windows open from Results.", "sn-note"));
+    const jump = el("a", "Go to results ↓", "sn-link");
+    jump.href = "#evaluations";
+    body.push(jump);
+    return card("WINDOW · 2 EPOCHS", title, body, w ? badge(w.state) : null, "sn-window");
+  }
+
+  function renderOverview(data) {
+    const target = $("#overview-body");
+    target.replaceChildren(renderCrown(data), renderNow(data), renderWindow(data), renderWeights(data.weights || {}));
     target.setAttribute("aria-busy", "false");
   }
 
@@ -424,9 +624,15 @@
     return box;
   }
 
+  function chainCell(v) {
+    const box = el("span", null, "sn-stack");
+    box.append(badge(v.freshness), el("small", `block ${integer(v.block)}`, "sn-muted sn-mono"));
+    return box;
+  }
+
   function renderValidators(data) {
     const target = $("#validators-body");
-    const validators = Array.isArray(data.validators) ? data.validators : [];
+    const validators = list(data.validators);
     if (!validators.length) {
       target.replaceChildren(empty("No validator reporting", "No validator publishes its status to this dashboard. Reporting is opt-in: registered validators may still hold chain commitments that are not listed here."));
       return;
@@ -436,18 +642,18 @@
       select.type = "button";
       select.setAttribute("aria-pressed", String(v.hotkey === state.validator));
       select.onclick = () => { selectValidator(v.hotkey); $("#queue").scrollIntoView({block: "start"}); };
-      return [ident(v.hotkey, "validator hotkey"), badge(v.mode), stake(v.stake), badge(v.freshness), integer(v.block), known(v.commitment_block) ? integer(v.commitment_block) : el("span", "None", "sn-unknown"), progressCell(v.progress), integer(v.used_count), integer(v.reserved_count), select];
+      return [who(v.uid, v.hotkey, "validator hotkey"), badge(v.mode), stake(v.stake), chainCell(v), known(v.commitment_block) ? integer(v.commitment_block) : el("span", "None", "sn-unknown"), progressCell(v.progress), integer(v.used_count), integer(v.reserved_count), select];
     });
-    target.replaceChildren(table("Validators", [["Hotkey"], ["Mode"], ["Stake", "sn-num"], ["Freshness"], ["Last block", "sn-num"], ["Commitment block", "sn-num"], ["Progress"], ["Consumed", "sn-num"], ["Reserved", "sn-num"], ["", "sn-action"]], rows,
+    target.replaceChildren(table("Validators", [["Validator"], ["Mode"], ["Stake", "sn-num"], ["Chain view"], ["Commitment block", "sn-num"], ["Work"], ["Consumed", "sn-num"], ["Reserved", "sn-num"], ["", "sn-action"]], rows,
       (i) => validators[i].hotkey === state.validator ? "sn-selected" : ""));
   }
 
   function renderScope(data) {
     const select = $("#validator-select");
-    const validators = Array.isArray(data.validators) ? data.validators : [];
+    const validators = list(data.validators);
     select.replaceChildren();
     for (const v of validators) {
-      const option = el("option", `${short(String(v.hotkey))} · ${v.mode ?? "unknown"}`);
+      const option = el("option", `${finite(v.uid) ? `UID ${v.uid} · ` : ""}${short(String(v.hotkey))} · ${v.mode ?? "unknown"}`);
       option.value = v.hotkey;
       select.append(option);
     }
@@ -491,13 +697,20 @@
     const perColdkey = new Map();
     for (const row of queue) perColdkey.set(row.coldkey, (perColdkey.get(row.coldkey) || 0) + 1);
     const rows = queue.map((row) => {
-      const cold = el("span", null, "sn-stack");
-      cold.append(ident(row.coldkey, "coldkey"));
+      const miner = el("span", null, "sn-stack");
+      miner.append(who(row.uid, row.hotkey, "hotkey"));
+      const cold = el("span", null, "sn-inline sn-small sn-muted");
+      cold.append(el("span", "coldkey"), ident(row.coldkey, "coldkey"));
+      miner.append(cold);
       const n = perColdkey.get(row.coldkey);
-      if (known(row.coldkey) && n > 1) cold.append(el("small", `${n} hotkeys in queue`, "sn-muted"));
-      return [known(row.position) ? String(row.position) : "—", ident(row.hotkey, "hotkey"), cold, ident(row.model_id, "model id"), integer(row.block), badge(row.status), badge(row.usage), known(row.window_id) ? String(row.window_id) : "—", row.reason ? el("span", row.reason, "sn-reason") : el("span", "—", "sn-muted")];
+      if (known(row.coldkey) && n > 1) miner.append(el("small", `${n} hotkeys in this queue`, "sn-muted"));
+      const position = finite(row.position) ? el("span", String(row.position), "sn-pos") : el("span", "—", "sn-muted");
+      if (!finite(row.position)) position.title = "No position in the current window";
+      return [position, miner, ident(row.model_id, "model id"), badge(row.status), reasonCell(row.reason), known(row.window_id) ? String(row.window_id) : "—", integer(row.block)];
     });
-    target.replaceChildren(table("Fair queue for the selected validator, in backend order", [["#", "sn-num"], ["Hotkey"], ["Coldkey"], ["Model"], ["Block", "sn-num"], ["Status"], ["Usage"], ["Window", "sn-num"], ["Reason", "sn-wide"]], rows));
+    const summary = queueSummary(queue);
+    target.replaceChildren(summary.chips, table("Queue for the selected validator, in backend order", [["#", "sn-num"], ["Miner"], ["Model"], ["Status"], ["Why", "sn-wide sn-stackcell"], ["Window", "sn-num"], ["Block", "sn-num"]], rows,
+      (i) => reasonInfo(queue[i].reason)?.tone === "bad" ? "sn-row-bad" : ""));
   }
 
   // ---------- Hotkeys (server paginated) ----------
@@ -535,7 +748,7 @@
   function renderHotkeys(data) {
     const target = $("#hotkeys-body");
     const {state: which, q} = state.hotkeys;
-    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const rows = list(data.rows);
     const total = Number.isFinite(data.total) ? data.total : null;
     const size = Number.isFinite(data.page_size) && data.page_size > 0 ? data.page_size : 50;
     const page = Number.isFinite(data.page) ? data.page : state.hotkeys.page;
@@ -543,8 +756,8 @@
     if (!rows.length) {
       parts.push(q ? empty("No matches", `No ${which} hotkey matches “${q}” for this validator.`) : empty(`No ${which} hotkeys`, which === "consumed" ? "This validator has not consumed any hotkey yet." : "No hotkey is reserved for this validator."));
     } else {
-      parts.push(table(`${which} hotkeys for the selected validator`, [["Hotkey", "sn-wide"], ["Coldkey", "sn-wide"], ["Model"], ["Status"], ["Window", "sn-num"], ["Reason"]],
-        rows.map((r) => [ident(r.hotkey, "hotkey", true), ident(r.coldkey, "coldkey", true), ident(r.model_id, "model id"), badge(r.status), known(r.window_id) ? String(r.window_id) : "—", r.reason ? el("span", r.reason, "sn-reason") : el("span", "—", "sn-muted")])));
+      parts.push(table(`${which} hotkeys for the selected validator`, [["Hotkey"], ["Coldkey"], ["Model"], ["Status"], ["Window", "sn-num"], ["Reason", "sn-wide sn-stackcell"]],
+        rows.map((r) => [who(r.uid, r.hotkey, "hotkey"), ident(r.coldkey, "coldkey"), ident(r.model_id, "model id"), badge(r.status), known(r.window_id) ? String(r.window_id) : "—", reasonCell(r.reason)])));
     }
     const pages = total == null ? null : Math.max(1, Math.ceil(total / size));
     const pager = el("nav", null, "sn-pager");
@@ -576,9 +789,11 @@
     for (const tab of tabs) {
       tab.onclick = () => choose(tab);
       tab.onkeydown = (event) => {
-        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        const i = tabs.indexOf(tab);
+        const to = {ArrowRight: i + 1, ArrowLeft: i - 1 + tabs.length, Home: 0, End: tabs.length - 1}[event.key];
+        if (to === undefined) return;
         event.preventDefault();
-        choose(tabs[(tabs.indexOf(tab) + 1) % tabs.length]);
+        choose(tabs[to % tabs.length]);
       };
     }
     const input = $("#hotkey-query");
@@ -595,35 +810,49 @@
     $("#hotkey-search").onsubmit = (event) => { event.preventDefault(); search(); };
   }
 
-  // ---------- Evaluations ----------
+  // ---------- Results ----------
   function renderEvaluations(data) {
     const target = $("#evaluations-body");
-    if (!state.validator) { target.replaceChildren(empty("No validator selected", "Select an evaluator to see its evaluations.")); return; }
-    const all = Array.isArray(data.evaluations) ? data.evaluations : [];
-    const list = all.filter((e) => e.validator === state.validator);
-    if (!list.length) {
+    if (!state.validator) { target.replaceChildren(empty("No validator selected", "Select an evaluator to see its results.")); return; }
+    const rows = list(data.evaluations).filter((e) => e.validator === state.validator);
+    if (!rows.length) {
       const v = currentValidator();
-      target.replaceChildren(empty("No evaluations", v && v.mode === "follower" ? "This validator follows; it does not evaluate models." : "No evaluation from this validator is published yet."));
+      target.replaceChildren(empty("No results", v && v.mode === "follower" ? "This validator follows; it does not evaluate models." : "No result from this validator is published yet."));
       return;
     }
-    const openWindow = data.window && data.window.state === "open" ? data.window.id : null;
-    const rows = list.map((e) => {
-      let action;
-      if (e.available) {
-        action = el("button", "Open detail", "sn-link");
-      } else {
-        action = el("button", e.window_id === openWindow ? "After close" : "Unavailable", "sn-link sn-link-muted");
-      }
-      action.type = "button";
-      action.dataset.action = "detail";
-      action.setAttribute("aria-haspopup", "dialog");
-      action.onclick = () => openDetail(e, action);
-      return [known(e.window_id) ? String(e.window_id) : "—", ident(e.hotkey, "hotkey"), ident(e.model_id, "model id"), evalStatus(e.status), score(e.quality, e.quality_upper), score(e.reward, e.reward_upper), known(e.report_hash) ? ident(e.report_hash, "report hash") : el("span", "Missing", "sn-unknown"), action];
+    // Group by window, newest first; rows keep backend order inside a window.
+    const groups = new Map();
+    for (const e of rows) {
+      const key = finite(e.window_id) ? e.window_id : null;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(e);
+    }
+    const keys = [...groups.keys()].sort((a, b) => (b ?? -1) - (a ?? -1));
+    const open = openWindowId(data);
+    const kingModel = data.king?.model_id;
+    const parts = keys.map((key) => {
+      const items = groups.get(key);
+      const section = el("section", null, "sn-rgroup");
+      const head = el("div", null, "sn-rgroup-head");
+      head.append(el("h3", key == null ? "Window unknown" : `Window ${key}`));
+      if (items.some((e) => e.available)) head.append(el("span", "Closed · reports open", "sn-badge sn-good"));
+      else if (key != null && key === open) head.append(el("span", "Open", "sn-badge sn-warn"), el("span", "Scores are published; clips and claims open after the window closes.", "sn-muted sn-small"));
+      else head.append(el("span", "Report unavailable", "sn-badge sn-neutral"));
+      const cells = items.map((e) => {
+        const model = el("span", null, "sn-inline");
+        model.append(ident(e.model_id, "model id"));
+        if (known(kingModel) && e.model_id === kingModel) model.append(el("span", "Current king", "sn-tag"));
+        const action = e.available ? reportButton(e, "Open report", "sn-btn sn-btn-small") : el("span", key != null && key === open ? "After close" : "Unavailable", "sn-muted sn-small");
+        return [who(e.uid, e.hotkey, "hotkey"), model, evalStatus(e.status), meter(e.quality, e.quality_upper), meter(e.reward, e.reward_upper), known(e.report_hash) ? ident(e.report_hash, "report hash") : el("span", "Missing", "sn-unknown"), action];
+      });
+      section.append(head, table(`Results in ${key == null ? "an unknown window" : `window ${key}`} from the selected evaluator`, [["Miner"], ["Model"], ["Status"], ["Quality", "sn-num"], ["Reward", "sn-num"], ["Report hash"], ["", "sn-action"]], cells,
+        (i) => known(kingModel) && items[i].model_id === kingModel ? "sn-kingrow" : ""));
+      return section;
     });
-    target.replaceChildren(table("Evaluations published by the selected validator", [["Window", "sn-num"], ["Hotkey"], ["Model"], ["Status"], ["Quality", "sn-num"], ["Reward", "sn-num"], ["Report"], ["", "sn-action"]], rows));
+    target.replaceChildren(...parts);
   }
 
-  // ---------- Detail dialog ----------
+  // ---------- Report dialog ----------
   function sameOrigin(url) {
     try { return new URL(url, location.href).origin === location.origin; } catch { return false; }
   }
@@ -639,11 +868,41 @@
     return details;
   }
 
+  // Quality and reward, challenger against the paired king. Upper bounds stay marked; a missing king stays blank.
+  function compare(caption, own, king, hasKing, upper = null) {
+    const t = el("table", null, "sn-compare");
+    t.append(el("caption", caption, "sn-visually-hidden"));
+    const head = el("tr");
+    for (const label of ["", "Quality", "Reward"]) {
+      const th = el("th", label);
+      th.scope = "col";
+      head.append(th);
+    }
+    const thead = el("thead");
+    thead.append(head);
+    const tbody = el("tbody");
+    const rows = [["Challenger", upper ? [null, upper.quality] : [own.quality], upper ? [null, upper.reward] : [own.reward]]];
+    if (hasKing) rows.push(["King", [king.quality], [king.reward]]);
+    for (const [label, q, r] of rows) {
+      const tr = el("tr");
+      const th = el("th", label);
+      th.scope = "row";
+      const tq = el("td");
+      tq.append(meter(...q));
+      const tr2 = el("td");
+      tr2.append(meter(...r));
+      tr.append(th, tq, tr2);
+      tbody.append(tr);
+    }
+    t.append(thead, tbody);
+    return t;
+  }
+
   function versus(rows, hasKing) {
     const t = el("table", null, "sn-mini");
-    t.append(el("caption", "Challenger compared with the king on the same clip", "sn-visually-hidden"));
+    t.append(el("caption", hasKing ? "Challenger compared with the king on the same clip" : "Challenger scores on this clip", "sn-visually-hidden"));
     const head = el("tr");
-    for (const label of ["", "Challenger", "King"]) {
+    for (const label of hasKing ? ["", "Challenger", "King"] : ["", "Challenger"]) {
       const th = el("th", label);
       th.scope = "col";
       head.append(th);
@@ -655,7 +914,8 @@
       const tr = el("tr");
       const th = el("th", label);
       th.scope = "row";
-      tr.append(th, el("td", a), el("td", hasKing ? b : "—"));
+      tr.append(th, el("td", a));
+      if (hasKing) tr.append(el("td", b));
       tbody.append(tr);
     }
     t.append(thead, tbody);
@@ -664,6 +924,8 @@
 
   // Claims are the model's timestamped answer (clip-local seconds). Each time seeks the clip player.
   const MODALITIES = ["visual", "speech", "text", "sound"];
+  const claimsOf = (response) => response && typeof response === "object" && Array.isArray(response.claims) ? response.claims : null;
+
   function claimRow(claim, video) {
     const li = el("li");
     const start = finite(claim?.start) ? claim.start : null;
@@ -673,7 +935,11 @@
     time.type = "button";
     if (video && start != null) {
       time.setAttribute("aria-label", `Play the clip from ${start.toFixed(1)} seconds`);
-      time.onclick = () => { video.currentTime = start; video.play().catch(() => {}); };
+      time.onclick = () => {
+        video.currentTime = start;
+        video.play().catch(() => {});
+        video.scrollIntoView({block: "nearest"});
+      };
     } else {
       time.disabled = true;
     }
@@ -685,35 +951,76 @@
     return li;
   }
 
-  function claimsBlock(label, response, video, open) {
-    const details = el("details", null, "sn-response");
-    details.open = open;
-    const claims = response && typeof response === "object" && Array.isArray(response.claims) ? response.claims : null;
-    details.append(el("summary", claims ? `${label} · ${claims.length} claim${claims.length === 1 ? "" : "s"}` : label));
+  function claimsColumn(label, response, video) {
+    const column = el("div", null, "sn-claims-col");
+    const claims = claimsOf(response);
+    const head = el("p", null, "sn-claims-head");
+    head.append(el("strong", label), el("span", claims ? plural(claims.length, "claim") : "", "sn-muted"));
+    column.append(head);
     if (claims && claims.length) {
       const ol = el("ol", null, "sn-claims");
       for (const claim of claims) ol.append(claimRow(claim, video));
-      details.append(ol);
+      column.append(ol);
     } else if (claims) {
-      details.append(el("p", "The model returned no claims.", "sn-muted"));
+      column.append(el("p", "The model returned no claims.", "sn-muted sn-claims-note"));
     } else if (known(response)) {
-      details.append(el("p", "Not a valid claim list; shown exactly as returned.", "sn-muted"), el("pre", typeof response === "string" ? response : JSON.stringify(response, null, 2)));
+      column.append(el("p", "Not a valid claim list; shown exactly as returned.", "sn-muted sn-claims-note"), el("pre", typeof response === "string" ? response : JSON.stringify(response, null, 2), "sn-raw-response"));
     } else {
-      details.append(el("p", "No response recorded.", "sn-muted"));
+      column.append(el("p", "No response recorded.", "sn-muted sn-claims-note"));
     }
-    return details;
+    return column;
   }
 
-  function clipCard(clip) {
+  // Claim intervals drawn against the clip length. Pointer shortcut only; the claim buttons are the accessible control.
+  function timeline(lanes, duration, video) {
+    const box = el("div", null, "sn-timeline");
+    box.setAttribute("aria-hidden", "true");
+    const heads = [];
+    for (const [label, claims] of lanes) {
+      const lane = el("div", null, "sn-lane");
+      const track = el("div", null, "sn-track");
+      for (const claim of list(claims)) {
+        if (!finite(claim?.start) || !finite(claim?.end) || claim.end <= claim.start) continue;
+        const kind = MODALITIES.includes(claim.modality) ? claim.modality : "other";
+        const seg = el("i", null, `sn-seg sn-seg-${kind}`);
+        const from = clamp(claim.start / duration);
+        seg.style.left = `${from * 100}%`;
+        seg.style.width = `${Math.max(0.6, (clamp(claim.end / duration) - from) * 100)}%`;
+        track.append(seg);
+      }
+      const head = el("i", null, "sn-playhead");
+      heads.push(head);
+      track.append(head);
+      if (video) {
+        track.classList.add("sn-seekable");
+        track.onclick = (event) => {
+          const rect = track.getBoundingClientRect();
+          video.currentTime = clamp((event.clientX - rect.left) / rect.width) * duration;
+          video.play().catch(() => {});
+        };
+      }
+      lane.append(el("span", label, "sn-lane-label"), track);
+      box.append(lane);
+    }
+    const scale = el("div", null, "sn-lane sn-scale");
+    const marks = el("span", null, "sn-scale-marks");
+    marks.append(el("span", "0 s"), el("span", `${decimal(duration, 1)} s`));
+    scale.append(el("span"), marks);
+    box.append(scale);
+    return {box, move: (t) => { for (const head of heads) head.style.left = `${clamp(t / duration) * 100}%`; }};
+  }
+
+  function clipCard(clip, index) {
     const article = el("article", null, "sn-clip");
     const head = el("div", null, "sn-clip-head");
     const range = known(clip.start) && known(clip.duration) ? `source ${decimal(clip.start, 1)} s → ${decimal(clip.start + clip.duration, 1)} s · ${decimal(clip.duration, 1)} s clip` : "Source range unknown";
-    const name = el("strong", "Clip ");
-    name.append(el("code", short(String(clip.id ?? "?"))));
+    const name = el("strong", `Clip ${index + 1} `);
+    name.append(ident(clip.id, "clip id"));
     head.append(name, el("span", range, "sn-muted"));
     article.append(head);
     const body = el("div", null, "sn-clip-body");
     const media = el("div", null, "sn-clip-media");
+    const k = clip.king;
     let video = null;
     if (known(clip.video_url) && sameOrigin(clip.video_url)) {
       video = el("video");
@@ -723,91 +1030,124 @@
       video.playsInline = true;
       // video_url already serves the cut clip; start/duration describe the source and are informational only.
       video.src = new URL(clip.video_url, location.href).href;
-      video.setAttribute("aria-label", `Clip ${clip.id ?? ""} video`);
+      video.setAttribute("aria-label", `Clip ${index + 1} video`);
+      media.append(video);
+    } else {
+      media.append(el("p", "Clip media not available.", "sn-muted sn-no-media"));
+    }
+    const lanes = [["Challenger", claimsOf(clip.response)]];
+    if (k) lanes.push(["King", claimsOf(k.response)]);
+    const line = finite(clip.duration) && clip.duration > 0 ? timeline(lanes, clip.duration, video) : null;
+    if (line) media.append(line.box);
+    if (video) {
       // Mark the claims (challenger and king) whose interval covers the playhead.
       video.addEventListener("timeupdate", () => {
         const t = video.currentTime;
+        if (line) line.move(t);
         for (const li of article.querySelectorAll(".sn-claims li[data-start]")) li.classList.toggle("sn-claim-now", t >= Number(li.dataset.start) && t < Number(li.dataset.end));
       });
-      media.append(video);
-    } else {
-      media.append(el("p", "Clip media not available.", "sn-muted"));
     }
-    const k = clip.king;
-    const stats = el("div", null, "sn-clip-stats");
-    stats.append(versus([
+    media.append(versus([
       ["Quality", decimal(clip.quality), decimal(k?.quality)],
       ["Latency", known(clip.latency_s) ? `${decimal(clip.latency_s, 2)} s` : "—", known(k?.latency_s) ? `${decimal(k.latency_s, 2)} s` : "—"],
       ["Time score", decimal(clip.time_score), decimal(k?.time_score)],
       ["Reward", decimal(clip.reward), decimal(k?.reward)],
     ], Boolean(k)));
-    stats.append(claimsBlock("Challenger claims", clip.response, video, true));
-    if (k) stats.append(claimsBlock("King claims", k.response, video, false));
-    body.append(media, stats);
+    const claims = el("div", null, k ? "sn-claims-grid" : "sn-claims-grid sn-claims-single");
+    claims.append(claimsColumn("Challenger claims", clip.response, video));
+    if (k) claims.append(claimsColumn("King claims", k.response, video));
+    body.append(media, claims);
     article.append(body);
     return article;
   }
 
-  function totals(label, quality, reward, kingQuality, kingReward, hasKing, upper = null) {
-    const box = el("div", null, "sn-totals");
-    box.append(el("p", label, "sn-eyebrow"));
-    const grid = el("dl");
-    const own = upper ? [["Quality upper bound", upper.quality, "≤ "], ["Reward upper bound", upper.reward, "≤ "]] : [["Quality", quality, ""], ["Reward", reward, ""]];
-    for (const [name, value, prefix = ""] of [...own, ["King quality", hasKing ? kingQuality : null], ["King reward", hasKing ? kingReward : null]]) {
-      const row = el("div");
-      row.append(el("dt", name), el("dd", known(value) ? prefix + decimal(value) : decimal(value)));
-      grid.append(row);
-    }
-    box.append(grid);
+  function sideCard(eyebrow, identity, model, numbers) {
+    const box = el("div", null, "sn-side");
+    box.append(el("p", eyebrow, "sn-eyebrow"), facts([["Miner", identity], ["Model", model]]));
+    if (numbers) box.append(numbers);
     return box;
   }
 
-  function renderDetail(detail) {
+  function sideNumbers(quality, reward, upper) {
+    const dl = el("dl", null, "sn-kr-nums");
+    for (const [label, value, bound] of [["Quality", quality, upper?.quality], ["Reward", reward, upper?.reward]]) {
+      const row = el("div");
+      const dd = el("dd");
+      dd.append(upper ? meter(null, bound) : meter(value, null));
+      row.append(el("dt", label), dd);
+      dl.append(row);
+    }
+    return dl;
+  }
+
+  function renderDetail(detail, evaluation) {
     const body = $("#detail-body");
     if (!detail || detail.available !== true) {
-      body.replaceChildren(empty("Detail not available", detail?.reason || "The backend did not provide a reason."));
+      body.replaceChildren(empty("Report not available", detail?.reason || "The backend did not provide a reason."));
       return;
     }
     const hasKing = Boolean(detail.opponent);
-    const parts = [];
-    const pair = el("div", null, "sn-pair");
-    const challenger = el("div");
-    challenger.append(el("p", "CHALLENGER", "sn-eyebrow"), facts([["Hotkey", ident(detail.hotkey, "challenger hotkey")], ["Model", ident(detail.model_id, "challenger model id")]]));
-    const king = el("div");
-    king.append(el("p", "PAIRED KING", "sn-eyebrow"), hasKing ? facts([["Hotkey", ident(detail.opponent.hotkey, "king hotkey")], ["Model", ident(detail.opponent.model_id, "king model id")]]) : el("p", "No king was paired with this evaluation.", "sn-muted"));
-    pair.append(challenger, king);
-    parts.push(pair);
     const t = detail.total || {};
     const early = detail.evaluation_status === "early_stop";
+    const upper = early ? {quality: t.quality_upper ?? detail.early_stop?.quality_upper, reward: t.reward_upper ?? detail.early_stop?.reward_upper} : null;
+    const parts = [];
+    const pair = el("div", null, "sn-pair");
+    const uid = finite(detail.uid) ? detail.uid : evaluation?.hotkey === detail.hotkey ? evaluation?.uid : null;
+    pair.append(sideCard(early ? "CHALLENGER · UPPER BOUND" : "CHALLENGER", who(uid, detail.hotkey, "challenger hotkey"), ident(detail.model_id, "challenger model id"), sideNumbers(t.quality, t.reward, upper)));
+    if (hasKing) {
+      pair.append(sideCard("PAIRED KING · SAME BATCH", who(detail.opponent.uid, detail.opponent.hotkey, "king hotkey"), ident(detail.opponent.model_id, "king model id"), sideNumbers(t.king_quality, t.king_reward, null)));
+    } else {
+      const none = el("div", null, "sn-side sn-side-empty");
+      none.append(el("p", "PAIRED KING", "sn-eyebrow"), el("p", "No king was paired with this evaluation.", "sn-muted"));
+      pair.append(none);
+    }
+    parts.push(pair);
     if (early) {
       const stop = detail.early_stop || {};
       const box = el("div", null, "sn-warnings");
       box.append(el("strong", `Early stop · ${stop.observed_videos ?? "?"} of ${stop.planned_videos ?? "?"} videos evaluated`));
-      const list = el("ul");
+      const items = el("ul");
       const method = stop.method === "finite_batch_90"
         ? `Statistical futility check at ${known(stop.confidence) ? Math.round(stop.confidence * 100) : "?"}% confidence for this fixed batch only, not for the model in general.`
         : stop.method === "best_possible_completion" ? "Even a perfect score on the remaining videos could not win." : `Method: ${stop.method ?? "unknown"}.`;
-      for (const text of [method, "The challenger total is an upper bound, not a measured score. A partial result never crowns a model.", "Evaluated clips below are measured; unevaluated videos are not shown."]) list.append(el("li", text));
-      box.append(list);
+      for (const text of [method, "The challenger total is an upper bound, not a measured score. A partial result never crowns a model.", "Evaluated clips below are measured; unevaluated videos are not shown."]) items.append(el("li", text));
+      box.append(items);
       parts.push(box);
     }
-    parts.push(totals(early ? "TOTAL · UPPER BOUND" : "TOTAL", t.quality, t.reward, t.king_quality, t.king_reward, hasKing,
-      early ? {quality: t.quality_upper ?? detail.early_stop?.quality_upper, reward: t.reward_upper ?? detail.early_stop?.reward_upper} : null));
-    const videos = Array.isArray(detail.videos) ? detail.videos : [];
+    const videos = list(detail.videos);
     const clipCount = videos.reduce((n, video) => n + list(video.clips).length, 0);
-    const meta = el("p", null, "sn-note");
-    meta.append(el("span", `${videos.length} video${videos.length === 1 ? "" : "s"} · ${clipCount} clip${clipCount === 1 ? "" : "s"} in this report · Report `), known(detail.report_hash) ? ident(detail.report_hash, "report hash") : el("span", "hash missing", "sn-unknown"), el("span", " · reward = quality × (0.8 + 0.2 × time_score), computed by the evaluator. Claim times play the clip from that moment."));
+    const meta = el("p", null, "sn-note sn-report-meta");
+    meta.append(el("span", `${plural(videos.length, "video")} · ${plural(clipCount, "clip")} · report `), known(detail.report_hash) ? ident(detail.report_hash, "report hash") : el("span", "hash missing", "sn-unknown"), el("span", " · reward = quality × (0.8 + 0.2 × time_score), computed by the evaluator. Select a claim time to play the clip from that moment."));
     parts.push(meta);
     if (!videos.length) parts.push(empty("No clips in report", "The report lists no sampled videos."));
-    for (const video of videos) {
+    const sections = videos.map((video, i) => {
       const section = el("section", null, "sn-video");
       const head = el("div", null, "sn-video-head");
-      head.append(el("h3", `Video ${video.id ?? "?"}`));
-      head.append(totals("VIDEO AVERAGE", video.quality, video.reward, video.king_quality, video.king_reward, hasKing));
+      const title = el("h3", `Video ${i + 1}`);
+      title.tabIndex = -1;
+      const id = el("span", null, "sn-video-id");
+      id.append(ident(video.id, "video id"));
+      const label = el("div");
+      label.append(title, id);
+      head.append(label, compare(`Video ${i + 1} average`, video, {quality: video.king_quality, reward: video.king_reward}, hasKing));
       section.append(head);
-      for (const clip of Array.isArray(video.clips) ? video.clips : []) section.append(clipCard(clip));
-      parts.push(section);
+      list(video.clips).forEach((clip, c) => section.append(clipCard(clip, c)));
+      return {section, title};
+    });
+    if (sections.length > 1) {
+      const nav = el("nav", null, "sn-jump");
+      nav.setAttribute("aria-label", "Videos in this report");
+      sections.forEach(({section, title}, i) => {
+        const button = el("button", `Video ${i + 1}`, "sn-btn sn-btn-small");
+        button.type = "button";
+        const reward = videos[i].reward;
+        if (finite(reward)) button.append(el("span", decimal(reward), "sn-muted"));
+        button.onclick = () => { section.scrollIntoView({block: "start"}); title.focus({preventScroll: true}); };
+        nav.append(button);
+      });
+      parts.push(nav);
     }
+    parts.push(...sections.map((s) => s.section));
     body.replaceChildren(...parts);
   }
 
@@ -816,21 +1156,24 @@
   async function openDetail(evaluation, trigger) {
     const dialog = $("#detail");
     detailTrigger = trigger;
-    $("#detail-context").textContent = `WINDOW ${evaluation.window_id ?? "?"} · VALIDATOR ${short(String(evaluation.validator ?? ""))}`;
-    $("#detail-body").replaceChildren(el("p", "Loading evaluation detail…", "sn-loading"));
+    $("#detail-context").textContent = `WINDOW ${evaluation.window_id ?? "?"} · EVALUATOR ${short(String(evaluation.validator ?? ""))}`;
+    $("#detail-body").replaceChildren(el("p", "Loading report…", "sn-loading"));
     if (!dialog.open) dialog.showModal();
     const seq = ++detailSeq;
     const path = ["/api/evaluations", evaluation.validator, evaluation.window_id, evaluation.model_id].map((part, i) => i ? encodeURIComponent(String(part)) : part).join("/");
     try {
       const detail = await read(path);
-      if (seq === detailSeq) renderDetail(detail);
+      if (seq === detailSeq) renderDetail(detail, evaluation);
     } catch {
-      if (seq === detailSeq) failure($("#detail-body"), "Evaluation detail", () => openDetail(evaluation, trigger));
+      if (seq === detailSeq) failure($("#detail-body"), "Evaluation report", () => openDetail(evaluation, trigger));
     }
   }
 
   function setupDialog() {
     const dialog = $("#detail");
+    // The sticky video jump bar sits under the sticky dialog header, whose height depends on wrapping.
+    const head = dialog.querySelector(".sn-dialog-head");
+    new ResizeObserver(() => dialog.style.setProperty("--dialog-head-h", `${head.offsetHeight}px`)).observe(head);
     $("#detail-close").onclick = () => dialog.close();
     dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
     dialog.addEventListener("close", () => {
@@ -862,7 +1205,7 @@
       state.data = data;
       state.fetchedAt = Date.now();
       state.failed = false;
-      state.validator = defaultValidator(Array.isArray(data.validators) ? data.validators : []);
+      state.validator = defaultValidator(list(data.validators));
       renderChain(data);
       renderErrors(data.errors);
       renderOverview(data);

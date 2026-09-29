@@ -7,11 +7,11 @@
  <a class="sn-brand" href="/"><img src="/static/mark.svg" alt="" width="28" height="28">witness<span>.</span></a>
  <p class="sn-caption">SUBNET DASHBOARD</p>
  <nav aria-label="Dashboard sections">
-  <a href="#overview">Overview</a>
-  <a href="#validators">Validators</a>
-  <a href="#queue">Fair queue</a>
+  <a href="#overview">Status</a>
+  <a href="#queue">Queue</a>
+  <a href="#evaluations">Results</a>
   <a href="#hotkeys">Hotkeys</a>
-  <a href="#evaluations">Evaluations</a>
+  <a href="#validators">Validators</a>
  </nav>
  <div class="sn-sidebar-bottom"><p>Read only. Finalized chain data. Turning this dashboard off has no effect on consensus.</p><a href="/">About Witness ↗</a></div>
 </aside>
@@ -24,39 +24,43 @@
 <p class="sn-stale" id="stale-banner" role="status" hidden><strong>STALE</strong><span id="stale-text"></span></p>
 <main id="main" class="sn-content">
  <section id="overview" aria-labelledby="overview-heading">
-  <div class="sn-heading"><div><p class="sn-eyebrow">WITNESS SUBNET</p><h1 id="overview-heading">King, weights and live evaluation</h1></div></div>
+  <div class="sn-heading"><div><p class="sn-eyebrow">WITNESS SUBNET</p><h1 id="overview-heading">Subnet status</h1></div><p class="sn-heading-note">Who holds the crown, what each evaluator is doing now, and what waits in its queue.</p></div>
   <div id="errors"></div>
   <div class="sn-overview" id="overview-body" aria-busy="true"><p class="sn-loading">Reading finalized chain state…</p></div>
-  <ul class="sn-rules" aria-label="Evaluation policy">
-   <li>No king: 100% burn</li>
-   <li>King: 30% king · 70% burn</li>
-   <li>First king needs 2 valid submissions</li>
-   <li>Window = 2 epochs</li>
-   <li>Each evaluator samples 5 videos × 2 clips from 1,000</li>
-   <li>2 Luna references per clip</li>
-   <li>King and challengers share the same batch</li>
-   <li>60 s answer limit per clip</li>
-   <li>One 90% futility check after 3 videos, for this batch only</li>
-   <li>Early stops publish upper bounds and never crown</li>
-   <li>Clip detail revealed only after the window closes</li>
-   <li>reward = quality × (0.8 + 0.2 × time_score)</li>
-  </ul>
- </section>
-
- <section id="validators" aria-labelledby="validators-heading">
-  <div class="sn-section-head"><h2 id="validators-heading">Validators</h2><p>Validators that publish status to this dashboard: mode, chain freshness and latest signed progress telemetry (display only). Reporting is opt-in, so registered validators may be missing here. Select one to inspect its queue, hotkeys and evaluations.</p></div>
-  <div id="validators-body"><p class="sn-loading">Loading validators…</p></div>
+  <details class="sn-policy">
+   <summary>Evaluation policy</summary>
+   <ul class="sn-rules" aria-label="Evaluation policy">
+    <li>No king: 100% burn</li>
+    <li>King: 30% king · 70% burn</li>
+    <li>First king needs 2 valid submissions</li>
+    <li>Window = 2 epochs</li>
+    <li>Each evaluator samples 5 videos × 2 clips from 1,000</li>
+    <li>2 Luna references per clip</li>
+    <li>King and challengers share the same batch</li>
+    <li>60 s answer limit per clip</li>
+    <li>One 90% futility check after 3 videos, for this batch only</li>
+    <li>Early stops publish upper bounds and never crown</li>
+    <li>Clip detail revealed only after the window closes</li>
+    <li>reward = quality × (0.8 + 0.2 × time_score)</li>
+   </ul>
+  </details>
  </section>
 
  <div class="sn-scope" id="scope" role="group" aria-label="Selected validator">
   <label for="validator-select">Validator</label>
   <select id="validator-select" disabled><option>Loading…</option></select>
   <span class="sn-scope-id" id="scope-id"></span>
+  <span class="sn-scope-note">Queue, results and hotkeys below are this validator’s view.</span>
  </div>
 
  <section id="queue" aria-labelledby="queue-heading">
-  <div class="sn-section-head"><h2 id="queue-heading">Fair queue</h2><p>Order, status and reason come from the backend. A coldkey may register several hotkeys; each hotkey carries one immutable challenge.</p></div>
+  <div class="sn-section-head"><h2 id="queue-heading">Queue</h2><p>Reserved challenges in backend order. Reserved hotkeys are not consumed; retry reasons explain why a challenge is held. A coldkey may register several hotkeys, each with one immutable challenge.</p></div>
   <div id="queue-body"><p class="sn-loading">Loading queue…</p></div>
+ </section>
+
+ <section id="evaluations" aria-labelledby="evaluations-heading">
+  <div class="sn-section-head"><h2 id="evaluations-heading">Results</h2><p>Scores published by the selected evaluator, grouped by window. Once a window closes, its report opens with playable clips and each model’s timestamped claims, paired with the king on the same batch.</p></div>
+  <div id="evaluations-body"><p class="sn-loading">Loading results…</p></div>
  </section>
 
  <section id="hotkeys" aria-labelledby="hotkeys-heading">
@@ -71,16 +75,16 @@
   <div id="hotkeys-body" role="tabpanel" aria-labelledby="tab-consumed" aria-live="polite"><p class="sn-loading">Loading hotkeys…</p></div>
  </section>
 
- <section id="evaluations" aria-labelledby="evaluations-heading">
-  <div class="sn-section-head"><h2 id="evaluations-heading">Evaluations</h2><p>Aggregates published by the selected evaluator. Once the window has closed, the report opens with playable clips, each model’s timestamped claims, timing and scores, paired with the king on the same batch.</p></div>
-  <div id="evaluations-body"><p class="sn-loading">Loading evaluations…</p></div>
+ <section id="validators" aria-labelledby="validators-heading">
+  <div class="sn-section-head"><h2 id="validators-heading">Validators</h2><p>Validators that publish status to this dashboard: mode, chain freshness and signed progress telemetry (display only). Reporting is opt-in, so registered validators may be missing here.</p></div>
+  <div id="validators-body"><p class="sn-loading">Loading validators…</p></div>
  </section>
 
  <footer class="sn-footer"><span>witness. / Read-only subnet dashboard</span><span>Missing values are shown as unknown, never as zero.</span></footer>
 </main>
 </div>
 <dialog class="sn-dialog" id="detail" aria-labelledby="detail-title">
- <div class="sn-dialog-head"><div><p class="sn-eyebrow" id="detail-context"></p><h2 id="detail-title">Evaluation detail</h2></div><button class="sn-btn" type="button" id="detail-close">Close</button></div>
+ <div class="sn-dialog-head"><div><p class="sn-eyebrow" id="detail-context"></p><h2 id="detail-title">Evaluation report</h2></div><button class="sn-btn" type="button" id="detail-close">Close</button></div>
  <div class="sn-dialog-body" id="detail-body" aria-live="polite"></div>
 </dialog>
 <noscript><p class="sn-noscript">JavaScript is needed for this dashboard. <a href="/api/subnet">Read the subnet state as JSON</a>.</p></noscript>
