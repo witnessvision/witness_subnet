@@ -319,22 +319,6 @@ def test_reward_averages_videos_and_random_batch_defaults():
     assert eval_score(video_scores(rows)) == {'videos': 2, 'quality': .5, 'reward': .5}
 
 
-def test_dashboard_has_no_majority_consensus_and_filters_used_per_validator(tmp_path):
-    from witness.benchmark.dashboard import Projection
-    roots = []
-    for i in range(2):
-        root = tmp_path/str(i); root.mkdir(); roots.append(str(root))
-        write_private(root/'queue.json', {'schema_version': 'witness-evaluator-status-2', 'validator': VALS[i],
-            'mode': 'evaluator', 'block': 10, 'updated_unix': time.time(), 'caught_up': True,
-            'king': entry(i), 'triggers': [{**entry(), 'status': 'done', 'usage': 'consumed', 'window_id': 1},
-                                        {**entry(1), 'status': 'queued', 'usage': 'reserved'}]})
-    projection = Projection(roots)
-    assert projection.state()['king']['hotkey'] == MINERS[0]
-    assert projection.hotkeys(VALS[1])['total'] == 1
-    assert projection.hotkeys(VALS[1], 'reserved')['rows'][0]['hotkey'] == MINERS[1]
-    (Path(roots[0])/'queue.json').unlink()
-    assert projection.state()['king'] is None  # never elect another king from remaining dashboards
-    assert projection.evaluation(VALS[1], 1, MODELS[0])['available'] is False
 
 
 def test_bootstrap_uses_same_evaluator_panel_and_can_beat_rejected_model():
@@ -524,8 +508,8 @@ def test_untrusted_manifest_types_fail_as_validation_errors():
             validate_manifest(value)
 
 
-def test_dashboard_seals_open_windows_and_checks_closed_media(tmp_path):
-    from witness.benchmark.dashboard import Projection, serve_status
+def test_status_seals_open_windows_and_checks_closed_media(tmp_path):
+    from witness.benchmark.status import Evidence, serve_status
     import httpx
     ledger = Ledger(tmp_path/'chain.sqlite3', activation_block=1, activation_epoch=0, policy=POLICY)
     ledger.ingest(snapshot(1), [])
@@ -541,20 +525,25 @@ def test_dashboard_seals_open_windows_and_checks_closed_media(tmp_path):
              'block': 1, 'triggers': [], 'evaluations': [{'window_id': 0, 'model_id': MODELS[0],
                                                         'available': True, 'report_hash': report_hash}]}
     write_private(tmp_path/'queue.json', state)
-    view = Projection([tmp_path])
+    view = Evidence(tmp_path)
     assert view.evaluation(VALS[0], 0, MODELS[0])['available'] is False
     with pytest.raises(FileNotFoundError): view.media(VALS[0], 0, digest)
     for block in range(2, 5): ledger.ingest(snapshot(block), [])
     assert view.evaluation(VALS[0], 0, MODELS[0])['available'] is True
     server = serve_status(tmp_path, '127.0.0.1', 0)
     try:
-        url = f'http://127.0.0.1:{server.server_port}/api/media/{VALS[0]}/0/{digest}.mp4'
+        base = f'http://127.0.0.1:{server.server_port}'
+        assert httpx.get(base + '/').status_code == 404
+        assert httpx.get(base + '/static/dashboard.html').status_code == 404
+        assert httpx.get(base + '/queue.json').json() == state
+        url = f'{base}/api/media/{VALS[0]}/0/{digest}.mp4'
         response = httpx.get(url, headers={'Range': 'bytes=0-3'})
         assert response.status_code == 206 and response.content == b'FAKE'
         media.write_bytes(b'ALTERED')
         assert httpx.get(url).status_code == 400
     finally:
         server.shutdown(); server.server_close(); ledger.close()
+
 
 
 def test_retrying_head_cannot_be_overtaken_by_same_coldkey(tmp_path):

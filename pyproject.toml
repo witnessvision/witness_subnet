@@ -27,7 +27,6 @@ dev = ["pytest==9.1.1"]
 witness-benchmark = "witness.benchmark.cli:main"
 witness-benchmark-miner = "witness.benchmark.miner:main"
 witness-validator = "witness.benchmark.validator:main"
-witness-dashboard = "witness.benchmark.dashboard:main"
 witness-gpu-watchdog = "witness.benchmark.watchdog:main"
 witness-gpu-setup = "witness.benchmark.runner:setup_main"
 
@@ -37,7 +36,7 @@ include = ["witness*"]
 exclude = ["tests*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "web/tests"]
+testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-"witness.benchmark" = ["pod_setup.sh", "pod_env/*.txt", "data/*.json", "dashboard.html"]
+"witness.benchmark" = ["pod_setup.sh", "pod_env/*.txt", "data/*.json"]

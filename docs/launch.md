@@ -24,13 +24,13 @@ writes until the corresponding checks below have measured evidence.
 
 ## Release and protocol
 
-1. Review the exact public source allowlist and secret scan, including the web
-   application in this repository. Include only the documented public packages;
+1. Review the exact public source allowlist and secret scan, including the status
+   export in this repository. Include only the documented public packages;
    exclude credentials, non-public data and host-specific configuration.
    Preserve the managed Git identity and pre-push guard.
-2. Run `.venv/bin/python -m pytest -q` on the exact release; it includes both
-   subnet and web tests. Install the `web[dev]` package from this checkout as
-   described in the README. The dashboard API contract remains shared.
+2. Run `.venv/bin/python -m pytest -q` on the exact release; it includes the
+   subnet tests as described in the README. Test separately installed display
+   applications independently of validator activation.
 3. Freeze the release/policy digest, public catalogue, activation block and actual
    subnet epoch. All validators use the same checkpoint. Do not point a v2 ledger
    at legacy HF/opinion commitments or silently change its policy on restart.

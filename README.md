@@ -53,19 +53,19 @@ Use Python 3.11+ and a repository-local environment:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m pip install -e '.[evaluator,dev]' -e 'web[dev]'  # evaluation, web and tests
+.venv/bin/python -m pip install -e '.[evaluator,dev]'  # evaluation and tests
 .venv/bin/python -m pytest -q
 ```
 
 Evaluators also need ffmpeg, a GPU and labeling/judging API credentials.
-A single GPU machine can run the validator, evaluation and web/API together;
+A single GPU machine can run the validator and evaluation together;
 no separate CPU server or GPU service is required. API spending limits are optional
 operator configuration, independent of consensus. The follower remains the default. Chain writes require explicit
 flags. See the activation checklist before starting paid evaluation or weights.
 
 The public repository contains protocol, scoring, validator runtime, tests, an
-empty miner template and the website in [`web/`](web/README.md). The web package
-shares this Git repository and depends on the subnet package. Credentials,
+empty miner template and read-only validator status/evidence endpoints.
+Website applications are installed separately. Credentials,
 non-public evaluation references and runtime outputs stay outside this repository.
 
 ## Code map
@@ -78,7 +78,7 @@ non-public evaluation references and runtime outputs stay outside this repositor
 | `pool.py`, `data/catalogue-v2.json`, `annotate.py`, `media.py` | Private per-window sampling and references |
 | `reward.py`, `scoring.py`, `judge.py`, `adjudication.py` | Versioned quality and time reward |
 | `gpu.py`, `watchdog.py`, `runner.py`, `pod_runtime.py`, `pod_env/` | GPU lifecycle, independent stop watchdog and pinned inference |
-| `dashboard.py` | Read-only display API and standalone dashboard |
+| `status.py` | Read-only validator status and finalized evidence export |
 | `round.py`, `duel.py`, `simulation.py`, `cli.py` | Offline benchmark/rehearsal utilities; no mainnet coronation authority |
 
 Paths in this table are relative to `witness/benchmark/`. Synthetic tests establish

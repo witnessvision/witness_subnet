@@ -5,18 +5,13 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from bittensor_wallet import Keypair
-from fastapi.testclient import TestClient
 
-from witness.events import canonical_bytes
 from witness.storage import write_private
 from witness.budget import DailyBudget, BudgetUnavailable
 from witness.benchmark.execution import run_process
 from witness.benchmark.gpu import LocalGpu
 from witness.benchmark.protocol import weight_vector, weights_match
-from witness.benchmark.telemetry import DOMAIN, public_status
 from witness.benchmark.validator import submit_weights
-from witness_web.app import create_app
 
 
 def test_archive_mirror_cannot_change_source_or_leave_archive():
@@ -100,30 +95,6 @@ def test_unlimited_api_accounting_and_operator_limit_are_separate(tmp_path):
         DailyBudget(path, daily_limit_usd=9.)
 
 
-def test_signed_telemetry_is_scoped_fresh_and_never_selects_king(tmp_path):
-    local = Keypair.create_from_uri('//Alice')
-    peer = Keypair.create_from_uri('//Bob')
-    write_private(tmp_path/'telemetry-peers.json', {'self': local.ss58_address, 'updated_unix': time.time(),
-                   'validators': {peer.ss58_address: 100 * 10**9}})
-    source = {'schema_version': 'witness-evaluator-status-2', 'validator': local.ss58_address,
-              'mode': 'evaluator', 'block': 10, 'caught_up': True, 'updated_unix': time.time(),
-              'king': None, 'triggers': [], 'evaluations': []}
-    write_private(tmp_path/'queue.json', source)
-    client = TestClient(create_app(sources=[str(tmp_path)], telemetry_root=tmp_path))
-    status = public_status({**source, 'validator': peer.ss58_address, 'king': {'hotkey': 'forged'}})
-    def envelope(body):
-        return {'status': body, 'signature': peer.sign(DOMAIN + canonical_bytes(body)).hex()}
-    assert client.post('/api/telemetry', json=envelope(status)).status_code == 200
-    state = client.get('/api/subnet').json()
-    assert state['king'] is None and len(state['validators']) == 2
-    assert state['validators'][1]['stake'] == 100.
-    assert client.post('/api/telemetry', json=envelope(status)).status_code == 400  # replay
-    tampered = envelope(status); tampered['status'] = {**status, 'block': 99}
-    assert client.post('/api/telemetry', json=tampered).status_code == 400
-    assert client.post('/api/telemetry', json=envelope({**status, 'updated_unix': time.time()-121})).status_code == 400
-    assert client.post('/api/telemetry', json=envelope({**status, 'private_reference': 'secret'})).status_code == 400
-    (tmp_path/'queue.json').unlink()
-    assert client.get('/api/subnet').json()['block'] is None
 
 
 def test_preprocessing_deadline_and_gpu_lock_do_not_kill_foreign_jobs(tmp_path, monkeypatch):

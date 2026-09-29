@@ -117,25 +117,25 @@ validators can still follow scores and set weights. Add `--publish-results` and
 
 ## One GPU machine, one startup command
 
-Install the subnet and web packages on a CUDA machine with the runtime image's
+Install the subnet package on a CUDA machine with the runtime image's
 pinned base dependencies. Prepare the GPU environments once, before activation:
 
 ```bash
-.venv/bin/python -m pip install -e '.[evaluator]' -e ./web
+.venv/bin/python -m pip install -e '.[evaluator]'
 .venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
-  --publish-results --set-weights --web-host 0.0.0.0 --web-port 8080
+  --publish-results --set-weights --status-host 0.0.0.0 --status-port 8099
 ```
 
-Use the local GPU configuration above. This process serves the web/API and runs
+Use the local GPU configuration above. This process exports validator status and runs
 chain tracking and evaluation independently. Model and media subprocesses remain
 isolated and cancellable. It never rents or stops a GPU and needs no RunPod key,
 SSH worker or separate GPU service. Process supervision for reboot recovery is
 optional. Put persistent state and encrypted wallet files on durable storage;
-never rely on a cloud container's ephemeral disk. Serve the web port over HTTPS.
+never rely on a cloud container's ephemeral disk. Serve the status port over HTTPS.
 
 Other GPU jobs must acquire the same `/var/lib/witness-gpu/gpu.lock` with `flock`.
 The evaluator acquires that lock for the whole paired attempt and checks for
@@ -280,35 +280,20 @@ under provider/network failure.
 
 ## Dashboard and operator state
 
-`--status-port 8099` defaults to loopback. Serve the public read-only projection
-behind the operator's chosen HTTPS proxy. Multiple sources may be displayed:
+`--status-port 8099` defaults to loopback. It exports this validator's status
+at `/queue.json` and finalized evidence at
+`/api/evaluations/{validator}/{window}/{model}` and
+`/api/media/{validator}/{window}/{digest}.mp4`. Place it behind the operator's
+chosen HTTPS proxy when sharing it. The status server serves no HTML or assets.
+Reports and clips remain unavailable while their window is open. Report hashes
+and media hashes are checked before serving evidence; references, API logs,
+model weights and sampling secrets remain private.
 
-```bash
-.venv/bin/witness-dashboard \
-  --source http://EVALUATOR_A:8099/queue.json \
-  --source http://EVALUATOR_B:8099/queue.json --port 8098
-```
-
-The first configured source supplies the chain decision shown on the page.
-If unavailable, that decision is unknown; the dashboard never elects a majority
-king. Additional sources contribute their own queues and evaluation detail.
-The same-process web/API accepts optional signed peer status at `POST /api/telemetry`.
-Other validators opt in with `--telemetry-url https://DASHBOARD/api/telemetry`;
-messages bind the hotkey signature to the public status, reject stale/replayed
-updates, and require current permitted-validator membership. Remote telemetry
-never supplies consensus decisions, and peer report links stay unavailable until
-a configured report source can verify them. Local closed reports and clips remain
-served by the existing routes. No wallet keys or private labels are sent.
-
-The separate web application accepts `WITNESS_VALIDATOR_SOURCES` as a JSON array.
-
-The API exposes `/api/subnet`, paginated/searchable `/api/hotkeys`, and closed
-`/api/evaluations/{validator}/{window}/{model}` reports with hash-bound media.
-Reports and clips remain unavailable while their window is open. Responses,
-quality, latency, time reward and clip/video/total averages are displayed after
-close. Reference facts, API logs, weights and sampling secrets remain private.
-Unavailable values stay unknown. Decision, submitted and applied weights are
-shown separately; commit/reveal can delay the last of these.
+Optional external display applications can consume these endpoints. Validators
+may send signed public status with `--telemetry-url https://DISPLAY/api/telemetry`.
+Signatures bind the hotkey to public status; receiving applications must reject
+stale/replayed updates and verify permitted-validator membership. Telemetry never
+supplies consensus decisions. No wallet keys or private labels are sent.
 
 Useful private files: `last-error.json`, `worker-error.json`,
 `commitment-error.json`, `weight-send.json`, `last-weights.json`,

@@ -35,3 +35,6 @@ dist/
 /web/data/
 /web/reports/
 /web/deploy/
+
+# Dashboard checkout moved outside this public repository
+/web
