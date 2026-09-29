@@ -4,11 +4,13 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import time
+import shutil
+from pathlib import Path
 
 from witness.storage import write_private
 from .compression import CompressionRequired
 from .evaluator import Evaluator
-from .protocol import Result
+from .protocol import Result, RESUME_WINDOW
 from .triggers import Triggers
 
 
@@ -159,6 +161,9 @@ class ManagedEvaluator(Evaluator):
         self.cleanup_retry_at = 0.
         self.hold_windows = set()
         self.compression_check = None
+        self.prefetch = None
+        self.prefetch_download = None
+        self.performance = None
         self.triggers.close()
         self.triggers = ScheduledTriggers(self.root / 'triggers.sqlite3',
             candidates=lambda: (self.ledger.active or {}).get('candidates', {}),
@@ -202,7 +207,25 @@ class ManagedEvaluator(Evaluator):
             self.triggers.observe(rows, set(snapshot['uids']),
                                   coldkeys=snapshot['coldkeys'], uids=snapshot['uids'])
             self.triggers.db.execute('INSERT OR REPLACE INTO queue_cursor VALUES (1,?)', (head,))
-        return super().update(snapshot, start_worker=start_worker)
+        answer = super().update(snapshot, start_worker=start_worker)
+        for record in rows:
+            if record['hotkey'] != self.hotkey:
+                continue
+            try:
+                result = Result.parse(record['value'])
+            except ValueError:
+                continue
+            path = self.root/'performance'/str(result.window)/(result.model_id+'.json')
+            if path.exists():
+                try:
+                    data=json.loads(path.read_text())
+                    write_private(path.with_suffix('.ack.json'), {'window_id':result.window,
+                        'uid':result.uid,'model_id':result.model_id,'finalized_block':record['block'],
+                        'observed_unix':time.time(),
+                        'wall_until_observed_finalization_s':time.time()-data['first_started_unix']})
+                except (OSError,ValueError,KeyError):
+                    pass
+        return answer
 
     def _miner_io(self, callback, window, *, preflight=False):
         from http.client import HTTPException
@@ -229,14 +252,23 @@ class ManagedEvaluator(Evaluator):
         def guarded(*args):
             if window['king'] and entry['model_id'] == window['king']['model_id']:
                 return original(*args)
-            return self._miner_io(lambda: original(*args), window)
+            def acquire():
+                current = self.prefetch
+                if current and current.entry['model_id'] == entry['model_id']:
+                    try:
+                        current.wait(lambda: self._cancelled(window))
+                    finally:
+                        if not current.thread.is_alive():
+                            self.prefetch = None
+                return original(*args)  # Verify the finished cache against its committed manifest.
+            return self._miner_io(acquire, window)
         self.download = guarded
         try:
             return super()._evaluate(entry, window, snapshot, rows, selected, **kwargs)
         finally:
             self.download = original
 
-    def _attempt(self, entry, window, snapshot, partials):
+    def _attempt_checked(self, entry, window, snapshot, partials):
         # Recheck the authoritative opening immediately before any miner I/O.
         # Queue growth or a stale/tampered dispatch must never expand this panel.
         with self.ledger.lock:
@@ -249,6 +281,7 @@ class ManagedEvaluator(Evaluator):
                     or any(entry.get(key) != candidate.get(key)
                            for key in ('hotkey', 'model_id', 'value', 'block', 'uid'))):
                 raise InterruptedError('not_admitted_to_window')
+        self._start_prefetch(entry, window, snapshot)
         if self.compression_check is None:
             raise RuntimeError('compression_checker_required')
         self._miner_io(lambda: self.compression_check(
@@ -278,7 +311,8 @@ class ManagedEvaluator(Evaluator):
                 return 'validator_stopping'
             if context and context[0] and context[0]['id'] != window:
                 return 'window_changed'
-            if context and self.attempt_epoch is not None and context[1]['epoch_index'] != self.attempt_epoch:
+            if (window < RESUME_WINDOW and context and self.attempt_epoch is not None
+                    and context[1]['epoch_index'] != self.attempt_epoch):
                 return 'epoch_changed'
             if self.deadline is not None and time.monotonic() >= self.deadline:
                 return 'attempt_budget_elapsed'
@@ -319,6 +353,8 @@ class ManagedEvaluator(Evaluator):
                 for view in (window, self.context[0] if self.context else None):
                     if view and view.get('king'):
                         models.discard(view['king']['model_id'])
+            if self.prefetch:
+                models.discard(self.prefetch.entry['model_id'])
             if models:
                 # Downloads and runner copies have one worker. The GPU lease also
                 # protects cooperating local jobs; no chain-thread filesystem work.
@@ -345,3 +381,144 @@ class ManagedEvaluator(Evaluator):
         self._recover_compression(window, snapshot)
         self._cleanup_models(window)
         return super().run_once(window, snapshot)
+
+    def _start_prefetch(self, active, window, snapshot):
+        from .prefetch import Prefetch
+        from .submission import ARCHITECTURES
+        if self.prefetch_download is None:
+            return
+        current = self.prefetch
+        if current:
+            available = {row['model_id'] for row in self.triggers.rows()}
+            if current.window != window['id'] or current.entry['model_id'] not in available:
+                current.stop()
+                if current.thread.is_alive():
+                    return  # A cancelled request must unwind before another acquisition starts.
+                self.prefetch = None
+            else:
+                return  # Keep even a completed/error result until that model is dispatched.
+        with self.ledger.lock:
+            opening = self.ledger.active
+            if not opening or opening['id'] != window['id']:
+                return
+            panel = opening['candidates']
+            waiting = {item['trigger_id'] for item in self.outbox if item.get('trigger_id')}
+            candidates = self.triggers.pending(10000, before_block=opening['start_block'],
+                                               current_block=snapshot['block'])
+            candidate = next((row for row in candidates if row['model_id'] != active['model_id']
+                              and row['id'] not in waiting and row['model_id'] in panel
+                              and all(row.get(key)==panel[row['model_id']].get(key)
+                                      for key in ('hotkey','model_id','value','block','uid'))), None)
+        if candidate is None:
+            return
+        cache = self.root/'models'
+        directory = cache/candidate['model_id']
+        if (directory/'witness-manifest.json').exists():
+            return
+        # Manifest architecture is unknown until authenticated acquisition. Reserve
+        # for the largest accepted package, foreground acquisition and 20 GB headroom.
+        maximum = max(row['max_bytes'] for row in ARCHITECTURES.values())
+        if shutil.disk_usage(self.root).free < 2*maximum+20*10**9:
+            write_private(self.root/'prefetch-status.json', {'status':'skipped_disk_reserve','unix':time.time()})
+            return
+        def cancelled():
+            with self.lock:
+                return (self.stopping.is_set() or not self.context or not self.context[0]
+                        or self.context[0]['id'] != window['id'])
+        def acquire(cancel, remaining):
+            began=time.monotonic()
+            error=None
+            try:
+                if self.compression_check is None:
+                    raise RuntimeError('compression_checker_required')
+                self.compression_check(candidate,snapshot,cancel,min(30.,remaining()))
+                return self.prefetch_download(candidate,snapshot,cancel,remaining_s=remaining)
+            except Exception as exc:
+                error=exc
+                raise
+            finally:
+                try:
+                    write_private(self.root/'prefetch-status.json', {'status':'failed' if error else 'ready',
+                        'uid':candidate['uid'],'model_id':candidate['model_id'],'window_id':window['id'],
+                        'elapsed_s':time.monotonic()-began,'error_type':type(error).__name__ if error else None,
+                        'unix':time.time()})
+                except OSError:
+                    pass
+        write_private(self.root/'prefetch-status.json',{'status':'downloading','uid':candidate['uid'],
+                       'model_id':candidate['model_id'],'window_id':window['id'],'unix':time.time()})
+        self.prefetch = Prefetch(candidate,window,acquire,cancelled,timeout_s=900.)
+
+    def _batch(self, window):
+        if self.performance:
+            with self.performance.phase('media_labels_controls'):
+                return super()._batch(window)
+        return super()._batch(window)
+
+    def _attempt(self, entry, window, snapshot, partials):
+        from .performance import Performance
+        meter=Performance(self.root,entry,window)
+        self.performance=meter
+        original_download, original_runner, original_batch, original_judge = (
+            self.download,self.runner,self.batch_factory,self.judge)
+        class MeasuredJudge:
+            def __getattr__(self,name): return getattr(original_judge,name)
+            def assess(self,*args,**kwargs):
+                with meter.phase('judge_provider'):
+                    return original_judge.assess(*args,**kwargs)
+        def download(*args,**kwargs):
+            cached=(self.root/'models'/args[0]['model_id']/'witness-manifest.json').exists()
+            with meter.phase('cache_validation' if cached else 'download_or_prefetch_wait'):
+                return original_download(*args,**kwargs)
+        def runner(items,job):
+            delegate=original_runner(items,job)
+            class MeasuredRunner:
+                def __getattr__(self,name): return getattr(delegate,name)
+                def __setattr__(self,name,value): setattr(delegate,name,value)
+                def __call__(self,models,tasks,paths):
+                    began=time.monotonic()
+                    with meter.phase('gpu_setup_transfer_load_warmup_inference'):
+                        result=delegate(models,tasks,paths)
+                    wall=time.monotonic()-began
+                    cached=getattr(delegate,'reused_task_ids',set())
+                    fresh=0.
+                    for model,outputs in result.items():
+                        for task,value in outputs.items():
+                            if not hasattr(value,'elapsed_s'):
+                                continue  # Timing cannot replace the scorer's validation.
+                            reused=(model,task) in cached
+                            if not reused: fresh+=value.elapsed_s
+                            meter.clips.append({'model_id':model,'task_id':task,'elapsed_s':value.elapsed_s,
+                                                'status':value.status,'reused':reused})
+                    meter.models.append({'models':models,'gpu_call_s':wall,'fresh_inference_s':fresh,
+                                         'setup_transfer_load_warmup_overhead_s':max(0.,wall-fresh)})
+                    return result
+            return MeasuredRunner()
+        self.download,self.runner,self.judge=download,runner,MeasuredJudge()
+        error=None
+        try:
+            return self._attempt_checked(entry,window,snapshot,partials)
+        except Exception as exc:
+            error=exc
+            raise
+        finally:
+            self.download,self.runner,self.batch_factory,self.judge=(
+                original_download,original_runner,original_batch,original_judge)
+            if error and self.prefetch and self.prefetch.entry['model_id']==entry['model_id']:
+                self.prefetch.stop()
+            status='deferred' if error else 'evaluation_ready_for_publication'
+            try:
+                data=meter.finish(status,error)
+                print(json.dumps({'event':'duel_timing','window':window['id'],'uid':entry['uid'],
+                                  'status':status,'attempt_s':data['latest']['active_s'],
+                                  'cumulative_active_s':data['active_s'],'wall_s':data['wall_s'],
+                                  'phases_s':data['latest']['phases_s']}),flush=True)
+            except (OSError, ValueError, TypeError, KeyError):
+                pass  # Diagnostic storage failure must not change a model result.
+            self.performance=None
+
+    def stop(self):
+        if self.prefetch:
+            self.prefetch.stop()
+        super().stop()
+        if self.prefetch:
+            self.prefetch.thread.join(timeout=35)

@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import threading
 
-from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, FIVE_VIDEO_POLICY, TEN_VIDEO_WINDOW, policy_identity
+from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, FIVE_VIDEO_POLICY, TEN_VIDEO_WINDOW, TEN_VIDEO_POLICY, RESUME_WINDOW, policy_identity
 from .submission import challenge_id, parse_submission
 
 
@@ -35,7 +35,7 @@ class Ledger:
         self.versioned_media = policy == policy_identity()
         previous = self.get('activation')
         if (previous and previous['block'] == activation_block and previous['epoch'] == activation_epoch
-                and previous['policy'] in (LEGACY_POLICY, FIVE_VIDEO_POLICY) and self.versioned_media):
+                and previous['policy'] in (LEGACY_POLICY, FIVE_VIDEO_POLICY, TEN_VIDEO_POLICY) and self.versioned_media):
             self._migrate_media_policy(expected, previous['policy'])
         if self.get('activation') not in (None, expected):
             raise ValueError('ledger_activation_or_policy_changed_use_explicit_migration')
@@ -47,7 +47,9 @@ class Ledger:
             return self.policy
         if window < MEDIA_RECOVERY_WINDOW:
             return LEGACY_POLICY
-        return FIVE_VIDEO_POLICY if window < TEN_VIDEO_WINDOW else self.policy
+        if window < TEN_VIDEO_WINDOW:
+            return FIVE_VIDEO_POLICY
+        return TEN_VIDEO_POLICY if window < RESUME_WINDOW else self.policy
 
     def _migrate_media_policy(self, expected, previous_policy):
         """The sole supported transition; reject any already reported affected window.
@@ -55,7 +57,8 @@ class Ledger:
         Closed pre-transition decisions, king, uses, commitments and cursor remain
         byte-for-byte intact. Fresh replay uses the same per-window policy schedule.
         """
-        first_window = MEDIA_RECOVERY_WINDOW if previous_policy == LEGACY_POLICY else TEN_VIDEO_WINDOW
+        first_window = {LEGACY_POLICY: MEDIA_RECOVERY_WINDOW, FIVE_VIDEO_POLICY: TEN_VIDEO_WINDOW,
+                        TEN_VIDEO_POLICY: RESUME_WINDOW}[previous_policy]
         self.db.execute('BEGIN IMMEDIATE')
         try:
             for row in self.db.execute('SELECT value FROM commitments'):

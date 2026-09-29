@@ -11,7 +11,7 @@ from witness.events import content_hash
 from witness.storage import write_private
 from .contract import InfrastructureError, Policy
 from .duel import cases, grade
-from .protocol import BASELINE, CONTROLS_OK, EARLY_STOP, REJECTED, Result, decide, quantize
+from .protocol import BASELINE, CONTROLS_OK, EARLY_STOP, REJECTED, Result, RESUME_WINDOW, decide, quantize
 from .reward import EVAL, eval_for_window, eval_score, judge_clip, video_scores
 from .stopping import futility, upper_units
 from .round import controls
@@ -69,7 +69,7 @@ class Evaluator:
         judge = CodexJudge(Policy(**base), model=api.model, effort=api.effort, api=api)
         policy = Policy(**{**base, 'judge_id': judge.identity})
 
-        def download(entry, snapshot, cancelled):
+        def download(entry, snapshot, cancelled, *, remaining_s=None):
             submission = parse_submission(entry['value'])
             cache = root / 'models'
             directory = cache / entry['model_id']
@@ -91,8 +91,8 @@ class Evaluator:
             try:
                 client = ModelClient(keypair, entry['hotkey'], address['host'], address['port'], submission)
                 client.cancelled = cancelled
-                client.remaining_s = lambda: (max(0., evaluator.deadline - time.monotonic())
-                                               if evaluator.deadline else 30.)
+                client.remaining_s = remaining_s or (lambda: (max(0., evaluator.deadline - time.monotonic())
+                                               if evaluator.deadline else 30.))
                 directory, info = client.download(cache, cancelled=cancelled, accepted_architectures=enabled,
                                                   cache_key=entry['model_id'])
             except NotImplementedError as error:
@@ -105,6 +105,7 @@ class Evaluator:
                    batch_factory=lambda window: window_batch(root / 'pool-v2', window['id'], hotkey,
                        gpu=gpu, api=labeler, policy=policy, source_urls=source_urls), download=download,
                    runner=lambda submissions, job: PodRunner(gpu, submissions, policy, job))
+        evaluator.prefetch_download = download
         api.request_timeout_s = labeler.request_timeout_s = lambda: (
             min(30., evaluator.deadline - time.monotonic()) if evaluator.deadline else 30.)
         return evaluator
@@ -184,7 +185,8 @@ class Evaluator:
             return (self.stopping.is_set() or self.context is None or self.context[0] is None
                     or self.context[0]['id'] != window['id']
                     or (self.deadline is not None and time.monotonic() >= self.deadline)
-                    or (self.attempt_epoch is not None and self.context[1]['epoch_index'] != self.attempt_epoch))
+                    or (window['id'] < RESUME_WINDOW and self.attempt_epoch is not None
+                        and self.context[1]['epoch_index'] != self.attempt_epoch))
 
     def _batch(self, window):
         spec = eval_for_window(window['id'])
@@ -239,6 +241,8 @@ class Evaluator:
         attempt = json.loads(attempts.read_text())['count'] + 1 if attempts.exists() else 1
         write_private(attempts, {'count': attempt})
         run = self.runner({model_id: item}, f'w{window["id"]}-{model_id[:16]}-{attempt}')
+        if window['id'] >= RESUME_WINDOW:
+            run.execution_cache = root / 'models' / model_id / 'executions'
         run.cancelled = lambda: self._cancelled(window)
         run.remaining_s = lambda: max(0., self.deadline - time.monotonic()) if self.deadline else 900.
         hardware_file = root / 'hardware.json'
@@ -364,7 +368,7 @@ class Evaluator:
         entry = {**pending[0], 'uid': window['candidates'][pending[0]['model_id']]['uid']}
         self.triggers.start(entry['id'], window['id'])
         try:
-            self.deadline = time.monotonic() + 900.
+            self.deadline = time.monotonic() + (1800. if window['id'] >= RESUME_WINDOW else 900.)
             if self.gpu:
                 self.gpu.cancelled = lambda: self._cancelled(window)
                 self.gpu.remaining_s = lambda: max(0., self.deadline - time.monotonic())

@@ -143,9 +143,10 @@ existing GPU processes. If occupied it defers without a miner penalty. This is
 cooperative scheduling: do not launch an uncoordinated GPU workload during a duel.
 The validator never terminates another operator's job.
 
-The 900-second attempt budget starts before shared preparation and downloads;
-completed clips, labels and grades are cached for retries. Local media/inference
-processes are cancelled at expiry or epoch change, with a five-second kill
+From window 13 the 1,800-second attempt budget starts before shared preparation
+and downloads; completed clips, labels, first model answers and grades survive
+retries. Work continues between epochs of the same two-epoch window. Local
+media/inference processes are cancelled at expiry or window closure, with a five-second kill
 backstop; network requests can take their bounded timeout to unwind. GPU setup
 is an installation step, not part of a production duel. A 60-second model answer
 limit is distinct from model loading, labeling and judging time.
@@ -156,7 +157,7 @@ HTTP/1.0 peers remain compatible. Only contiguous completed ranges are appended
 to partial files, so retries resume without holes even if ranges arrive out of
 order. Interrupted or truncated transfers are retried; complete files must still
 match their committed hashes. Slow initial downloads can span multiple attempts
-and windows: the 900-second attempt limit is not a total download or duel limit.
+and windows: the per-attempt limit is not a total download or duel limit.
 
 Planned epoch/window cancellation and an exhausted attempt budget resume without
 the exponential failure backoff. Real infrastructure failures still back off.
@@ -299,3 +300,29 @@ Useful private files: `last-error.json`, `worker-error.json`,
 `commitment-error.json`, `weight-send.json`, `last-weights.json`,
 `watchdog-status.json`, `gpu.json`. Errors are type-only to avoid leaking provider
 payloads. Keep these files out of the public repository.
+
+## Prefetch and performance evidence
+
+The owned evaluator can download one additional challenger while the current
+paired evaluation runs. It must belong to the frozen window panel; late
+submissions cannot be prefetched into the active evaluation. Acquisition uses
+an independent 900-second turn, existing cumulative time/package limits,
+mandatory zstandard and final manifest/file hash verification. Before starting,
+free space must cover two maximum-size packages plus 20 GB reserve. Prefetch
+never runs a model, publishes a score, consumes a hotkey, or changes queue order.
+Window closure or shutdown cancels it. Foreground acquisition waits for that
+model's prefetch to unwind, preventing two writers to the same partial files.
+
+Private `performance/<window>/<model>.json` records each challenge's cumulative
+active seconds, elapsed wall time since its first attempt (including retries),
+and the latest attempt's phase timings. `performance-latest.json` and structured
+`duel_timing` log events provide a concise operational view. Preparation/labels,
+download or prefetch wait, cache verification, GPU calls and judge-provider
+time are measured separately; nested phases must not be added as a total.
+Per-clip measured latency, status, reused-answer markers and p50/p95/max are
+recorded. GPU call time includes setup, transfer, load and warmup; subtracting
+new clip latency gives aggregate overhead, not an isolated load measurement.
+Ready-for-publication is distinct from finalized chain acknowledgment.
+A separate `<model>.ack.json` records the actual finalized commitment block
+and elapsed wall time until this validator observed that acknowledgment.
+Timing diagnostics never feed scoring or consensus.

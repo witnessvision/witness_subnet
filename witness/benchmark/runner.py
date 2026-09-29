@@ -12,7 +12,8 @@ from pathlib import Path
 import subprocess
 import threading
 
-from witness.storage import write_private
+from witness.storage import write_private, store_immutable
+from witness.events import content_hash
 from .contract import Execution, InfrastructureError, Policy, Task, prompt
 from .gpu import DEFAULT_IMAGE, GPU_TYPES, Gpu
 from .submission import verify_directory
@@ -90,6 +91,11 @@ def _run_job(gpu: Gpu, script: str, environment: str, spec: dict, local: Path, r
     finally:
         done.set()
         watcher.join(timeout=6)
+        if script == 'pod_runtime.py':
+            try:
+                write_private(local.with_suffix('.output.json'), {'lines': gpu.read(output)})
+            except (OSError, InfrastructureError):
+                pass  # Keep the original failure; an unreadable artifact cannot be reused.
     write_private(local.with_suffix(".log.json"), {"returncode": status, "stderr": stderr[-4000:]})
     if "gpu_unhealthy" in stderr:
         gpu.discard()
@@ -125,10 +131,57 @@ class PodRunner:
         self.batch_index = 0
         self.remote = None
         self.verified = set()
+        self.execution_cache = None
+        self.reused_task_ids = set()
+
+    def _binding(self, model_id, task):
+        return content_hash({'model_id': model_id, 'task': task.model_dump(),
+                             'policy': self.policy.model_dump(), 'max_new_tokens': MAX_NEW_TOKENS,
+                             'manifest': self.submissions[model_id]['manifest']})
+
+    def _saved(self, model_id, tasks):
+        rows = {}
+        if self.execution_cache is None:
+            return rows
+        for task in tasks:
+            key = self._binding(model_id, task)
+            path = self.execution_cache / (key + '.json')
+            if path.exists():
+                item = json.loads(path.read_text())
+                if item.get('binding') != key or item.get('row', {}).get('task_id') != task.id:
+                    raise InfrastructureError('cached_execution_binding_failed')
+                self._execution(model_id, task, item['row'])
+                rows[task.id] = item['row']
+        return rows
+
+    def _save_lines(self, model_id, tasks, lines):
+        if self.execution_cache is None:
+            return
+        expected = {task.id: task for task in tasks}
+        for line in lines.splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # Only fully flushed rows may survive an interrupted job.
+            task = expected.get(row.get('task_id')) if isinstance(row, dict) else None
+            if task is None or not isinstance(row.get('hardware_id'), str) or not row['hardware_id']:
+                continue
+            self._execution(model_id, task, row)
+            key = self._binding(model_id, task)
+            store_immutable(self.execution_cache / (key + '.json'), {'binding': key, 'row': row})
 
     def __call__(self, models: list[str], tasks: list[Task], paths: list[Path]) -> dict[str, dict[str, Execution]]:
         if self.cancelled() or self.remaining_s() <= 0:
             raise InfrastructureError('evaluation_cancelled_or_budget_expired')
+        saved = {model: self._saved(model, tasks) for model in models}
+        self.reused_task_ids = {(model,task) for model,rows in saved.items() for task in rows}
+        if all(len(saved[model]) == len(tasks) for model in models):
+            identities = {row['hardware_id'] for rows in saved.values() for row in rows.values()}
+            if len(identities) != 1:
+                raise InfrastructureError('gpu_changed_during_job')
+            self.hardware_id = next(iter(identities))
+            return {model: {task.id: self._execution(model, task, saved[model][task.id]) for task in tasks}
+                    for model in models}
         if self.remote is None:
             self.remote = prepare(self.gpu, self.job)
         remote = self.remote
@@ -136,6 +189,9 @@ class PodRunner:
         self.gpu.put(paths, remote + "/clips/")
         results = {}
         for model_id in models:
+            if len(saved[model_id]) == len(tasks):
+                results[model_id] = {task.id: self._execution(model_id,task,saved[model_id][task.id]) for task in tasks}
+                continue
             submission = self.submissions[model_id]
             manifest, local = submission["manifest"], Path(submission["path"])
             verify_directory(local, manifest)
@@ -153,30 +209,42 @@ class PodRunner:
                 if checked.returncode or checked.stdout.split()[0] != row["sha256"]:
                     raise InfrastructureError("gpu_model_integrity_failed")
             self.verified.add(model_id)
+            requested_tasks = tasks
+            tasks = [task for task in requested_tasks if task.id not in saved[model_id]]
+            task_paths = {task.id: path for task, path in zip(requested_tasks, paths)}
             spec = {"arch": manifest["arch"], "weights": weights,
                     "max_new_tokens": MAX_NEW_TOKENS, "load_timeout_s": 120,
                     "tasks": [{"task_id": task.id, "path": f"{remote}/clips/{path.name}", "prompt": prompt(task.duration),
                                "deadline_s": self.policy.deadline_s(task.duration)}
-                              for task, path in zip(tasks, paths)]}
+                              for task, path in ((task, task_paths[task.id]) for task in tasks)]}
             # Staged batches permit inference savings without reloading once per
             # video. Reload/warmup are bounded inside the attempt budget.
             seconds = min(self.remaining_s(), 120 + sum(self.policy.deadline_s(task.duration) for task in tasks)
                           + max(self.policy.deadline_s(task.duration) for task in tasks) + 5)
             if seconds <= 0 or self.cancelled():
                 raise InfrastructureError('evaluation_cancelled_or_budget_expired')
-            status, lines = _run_job(self.gpu, "pod_runtime.py", ENVIRONMENTS[manifest["arch"]], spec,
-                                     self.gpu.root / "jobs" / self.job / f"{model_id}-{self.batch_index}.json",
-                                     remote, seconds, cancelled=self.cancelled)
+            artifact = self.gpu.root / 'jobs' / self.job / f'{model_id}-{self.batch_index}.json'
+            try:
+                status, lines = _run_job(self.gpu, "pod_runtime.py", ENVIRONMENTS[manifest["arch"]], spec,
+                                         artifact, remote, seconds, cancelled=self.cancelled)
+            except (InfrastructureError, InterruptedError):
+                output = artifact.with_suffix('.output.json')
+                if output.exists():
+                    self._save_lines(model_id, tasks, json.loads(output.read_text())['lines'])
+                raise
+            self._save_lines(model_id, tasks, lines)
             # 0: clips attempted; 2: the weights cannot be loaded; TIMED_OUT: the model ran out of time.
             # Those score as invalid answers. Anything else is the validator's infrastructure: retried, never scored.
             if status not in (0, 2, TIMED_OUT):
                 raise InfrastructureError(f"gpu_runtime_exit_{status}")
             rows = {row["task_id"]: row for row in map(json.loads, lines.splitlines())}
+            rows.update(saved[model_id])
             identities = {r["hardware_id"] for r in rows.values() if r.get("hardware_id")}
             if len(identities) > 1:
                 raise InfrastructureError("gpu_changed_during_job")
             self.hardware_id = next(iter(identities), None)
-            results[model_id] = {task.id: self._execution(model_id, task, rows.get(task.id)) for task in tasks}
+            results[model_id] = {task.id: self._execution(model_id, task, rows.get(task.id)) for task in requested_tasks}
+            tasks = requested_tasks
         return results
 
     def _execution(self, model_id: str, task: Task, row: dict | None) -> Execution:

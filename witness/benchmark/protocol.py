@@ -24,6 +24,8 @@ WINDOW_EPOCHS = 2
 # Explicit mainnet transition: windows 0..8 retain the finalized v2 policy.
 MEDIA_RECOVERY_WINDOW = 9
 TEN_VIDEO_WINDOW = 12
+RESUME_WINDOW = 13
+TEN_VIDEO_POLICY = "3caf2020574fcc790fbe1d14dca4c9749f6916edc87a3f66217cb9c258a64341"
 FIVE_VIDEO_POLICY = "4623a70ac9c406d8af341390cb25e7d22b29cada7b1b78929d6303cbc27bd239"
 LEGACY_POLICY = "d063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918"
 BURN_FRACTION = .7
@@ -143,6 +145,8 @@ def policy_identity() -> str:
                          "catalogue": hashlib.sha256(catalog.read_bytes()).hexdigest() if catalog.exists() else None,
                          "media_recovery": "deterministic-reserve-v1-from-window-9",
                          "ten_video_window": TEN_VIDEO_WINDOW, "five_video_policy": FIVE_VIDEO_POLICY,
+                         "resume_window": RESUME_WINDOW, "ten_video_policy": TEN_VIDEO_POLICY,
+                         "execution": "durable-first-answer-per-clip-v1", "attempt_budget_s": 1800,
                          "window_epochs": WINDOW_EPOCHS, "videos": 10, "clips": 2, "references": 2,
                          "clip_timeout_s": 60,
                          "early_stop": "finite-batch-90-one-look-after-three-generalized",

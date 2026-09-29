@@ -32,7 +32,10 @@ Before the first king is decided, the allocation is **100% burn**.
 3. **Evaluate:** every two actual subnet epochs, each evaluator privately samples
    **10 videos from a public catalogue of 1,000** (from window 12; earlier windows retain 5), then **2 random 10–30 s clips per
    video**. Luna supplies two references per clip. The king and all challengers
-   admitted to that window share its batch. The king runs once per window.
+   admitted to that window share its batch. The king runs once per window. From window 13, paired attempts allow up to
+   30 minutes within the same two-epoch window; the clip cap remains 60 seconds.
+   Completed model answers survive interruption and scoring retries. A bounded
+   background download can prepare one other admitted challenger.
    From window 9, sources missing audio/video, too short for the required clips,
    or with invalid clip bounds/duration are excluded before model evaluation.
    An independently seeded deterministic reserve supplies replacements in the

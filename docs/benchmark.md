@@ -86,8 +86,14 @@ its provisional bound. Unresolved bounds may block an ambiguous promotion.
 Only a bound that rules out victory at window close consumes that evaluator's
 attempt; an unresolved partial remains retryable. Bootstrap uses full results.
 
-The paired attempt has a 900-second budget starting before shared preparation
-and downloads, and cancels when its starting epoch changes. Local media and GPU
+From window 13 the paired attempt has a 1,800-second budget starting before
+shared preparation and downloads. It may cross an epoch boundary within the
+same two-epoch window; window closure always cancels it. Earlier windows retain
+the 900-second budget and epoch cancellation. Completed first answers are
+atomically cached by model, clip/task, runtime and policy. Interrupted GPU jobs
+retain fully flushed responses; a judge retry reuses the same measured answer
+and latency rather than generating another. Missing interrupted tasks remain
+pending, never implicit zero scores. Local media and GPU
 processes poll cancellation and terminate owned children with a five-second kill
 backstop. Model loading is capped at 120 seconds per worker and warmup at one clip
 deadline. Label/judge requests use at most 30 seconds and the remaining attempt

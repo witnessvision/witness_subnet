@@ -52,7 +52,7 @@ writes until the corresponding checks below have measured evidence.
   references each, correct control scores, one cached king evaluation and several
   queued challengers on the same window batch. Record actual throughput and costs;
   do not infer them from mock tests or historical unrelated runs.
-  Verify the 60-second clip cap, cancellation on epoch change and attempt-budget
+  Verify the 60-second clip cap, cancellation on window closure and attempt-budget
   expiry on the real GPU, including during load/warmup. Exercise a three-video
   statistical cut, a later full continuation prompted by another evaluator,
   and an unresolved partial at window close. Measure false-cut frequency against
