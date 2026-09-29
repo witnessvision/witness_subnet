@@ -12,6 +12,10 @@ from .protocol import Result
 from .triggers import Triggers
 
 
+class MinerUnavailable(RuntimeError):
+    """Miner transport failed; withdraw locally without publishing a result."""
+
+
 class ScheduledTriggers(Triggers):
     """Dispatch the active window fairly, without penalizing planned cancellation."""
 
@@ -19,15 +23,33 @@ class ScheduledTriggers(Triggers):
         super().__init__(path)
         self.candidates, self.interruption = candidates, interruption
         self.current_block = current_block
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(triggers)')}
+        for name in ('removed_block', 'readmission_block'):
+            if name not in columns:
+                self.db.execute(f'ALTER TABLE triggers ADD COLUMN {name} INTEGER')
+        self.db.execute('CREATE TABLE IF NOT EXISTS queue_cursor (id INTEGER PRIMARY KEY, block INTEGER)')
 
     def observe(self, commitments, registered, *args, **kwargs):
         # Keep the first binding even while a transport is excluded.
         with self.lock:
+            withdrawn = list(self.db.execute("SELECT * FROM triggers WHERE status='withdrawn'"))
+            rows = ([{'hotkey': key, **row} for key, row in commitments.items()]
+                    if isinstance(commitments, dict) else commitments)
+            for old in withdrawn:
+                fresh = [r for r in rows if r['hotkey'] == old['hotkey']
+                         and r['value'] == old['value'] and r['block'] > old['removed_block']
+                         and r['hotkey'] in registered]
+                if fresh:
+                    block = min(r['block'] for r in fresh)
+                    self.db.execute("UPDATE triggers SET status='queued',reason='resubmitted',"
+                                    "readmission_block=?,retry_block=0 WHERE id=?", (block, old['id']))
             excluded = {r['hotkey'] for r in self.excluded()}
-            return super().observe(commitments, set(registered) - excluded, *args, **kwargs)
+            # Keep the immutable first binding, including withdrawn records.
+            blocked = {r['hotkey'] for r in withdrawn}
+            return super().observe(rows, set(registered) - excluded - blocked, *args, **kwargs)
 
     def rows(self):
-        return [row for row in super().rows() if row['status'] != 'excluded']
+        return [row for row in super().rows() if row['status'] not in ('excluded', 'withdrawn')]
 
     def excluded(self):
         with self.lock:
@@ -45,7 +67,7 @@ class ScheduledTriggers(Triggers):
     def reconcile(self, hotkey, result, *, window, rejected=False):
         # Only the finalized ledger can turn an excluded entry into a used one.
         with self.lock:
-            self.db.execute("UPDATE triggers SET status='queued' WHERE hotkey=? AND status='excluded'",
+            self.db.execute("UPDATE triggers SET status='queued' WHERE hotkey=? AND status IN ('excluded','withdrawn')",
                             (hotkey,))
             return super().reconcile(hotkey, result, window=window, rejected=rejected)
 
@@ -72,8 +94,8 @@ class ScheduledTriggers(Triggers):
         candidates = self.candidates()
         with self.lock:
             rows = self.db.execute('''SELECT t.*, c.turn FROM triggers t JOIN coldkey_turns c USING(coldkey)
-                WHERE status IN ('queued','running','failed') AND block < ?
-                ORDER BY c.turn,t.block,t.hotkey''', (before_block,)).fetchall()
+                WHERE status IN ('queued','running','failed') AND COALESCE(readmission_block,block) < ?
+                ORDER BY c.turn,COALESCE(t.readmission_block,t.block),t.hotkey''', (before_block,)).fetchall()
         groups = {}
         for row in rows:
             if row['reason'] == 'DownloadBudgetExceeded':
@@ -94,6 +116,14 @@ class ScheduledTriggers(Triggers):
         return result
 
     def defer(self, trigger_id, reason, retry_block=0):
+        if reason == 'MinerUnavailable':
+            with self.lock:
+                row = self.db.execute('SELECT window_id FROM triggers WHERE id=?', (trigger_id,)).fetchone()
+                if row and not self.interruption(row['window_id']):
+                    self.db.execute("UPDATE triggers SET status='withdrawn',reason='miner_unavailable',"
+                                    "removed_block=?,retry_block=0 WHERE id=? AND status='running'",
+                                    (self.current_block() if self.current_block else 0, trigger_id))
+                    return
         if reason == 'CompressionRequired':
             with self.lock:
                 self.db.execute("UPDATE triggers SET status='excluded',reason='compression_required',"
@@ -161,6 +191,51 @@ class ManagedEvaluator(Evaluator):
         worker.compression_check = check
         return worker
 
+    def update(self, snapshot, *, start_worker=True):
+        # The consensus ledger retains first bindings, so reread fresh finalized
+        # commitments separately for explicit readmission of the SAME model.
+        with self.triggers.lock:
+            row = self.triggers.db.execute('SELECT block FROM queue_cursor WHERE id=1').fetchone()
+            cursor = row[0] if row else 0
+            head = self.ledger.cursor
+            rows = self.ledger.history(cursor + 1, head + 1)
+            self.triggers.observe(rows, set(snapshot['uids']),
+                                  coldkeys=snapshot['coldkeys'], uids=snapshot['uids'])
+            self.triggers.db.execute('INSERT OR REPLACE INTO queue_cursor VALUES (1,?)', (head,))
+        return super().update(snapshot, start_worker=start_worker)
+
+    def _miner_io(self, callback, window, *, preflight=False):
+        from http.client import HTTPException
+        from ssl import SSLError
+        from .download_budget import DownloadBudgetExceeded
+        from .contract import InfrastructureError
+        try:
+            return callback()
+        except Exception as error:
+            remote = not isinstance(error, (CompressionRequired, DownloadBudgetExceeded)) and (
+                      isinstance(error, (ConnectionError, TimeoutError, HTTPException, SSLError))
+                      or isinstance(error, OSError) and str(error).startswith(('model_server_status_', 'incomplete_model_'))
+                      or preflight and isinstance(error, (OSError, InterruptedError))
+                      or preflight and isinstance(error, ValueError)
+                      and str(error) in ('miner_tls_pin_mismatch', 'unsafe_model_endpoint')
+                      or isinstance(error, InfrastructureError) and str(error) == 'miner_endpoint_unavailable')
+            if remote and not self._cancelled(window):
+                raise MinerUnavailable('miner_unavailable') from error
+            raise
+
+    def _evaluate(self, entry, window, snapshot, rows, selected, **kwargs):
+        original = self.download
+        # Attribute only challenger download failures, never king/judge/GPU failures.
+        def guarded(*args):
+            if window['king'] and entry['model_id'] == window['king']['model_id']:
+                return original(*args)
+            return self._miner_io(lambda: original(*args), window)
+        self.download = guarded
+        try:
+            return super()._evaluate(entry, window, snapshot, rows, selected, **kwargs)
+        finally:
+            self.download = original
+
     def _attempt(self, entry, window, snapshot, partials):
         # Recheck the authoritative opening immediately before any miner I/O.
         # Queue growth or a stale/tampered dispatch must never expand this panel.
@@ -170,12 +245,14 @@ class ManagedEvaluator(Evaluator):
             if (not opening or opening['id'] != window['id']
                     or opening['start_block'] != window['start_block']
                     or not candidate or candidate['block'] >= opening['start_block']
+                    or (entry.get('readmission_block') or entry['block']) >= opening['start_block']
                     or any(entry.get(key) != candidate.get(key)
                            for key in ('hotkey', 'model_id', 'value', 'block', 'uid'))):
                 raise InterruptedError('not_admitted_to_window')
         if self.compression_check is None:
             raise RuntimeError('compression_checker_required')
-        self.compression_check(entry, snapshot, lambda: self._cancelled(window), 30.)
+        self._miner_io(lambda: self.compression_check(
+            entry, snapshot, lambda: self._cancelled(window), 30.), window, preflight=True)
         return super()._attempt(entry, window, snapshot, partials)
 
     def _recover_compression(self, window, snapshot):

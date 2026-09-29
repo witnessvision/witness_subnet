@@ -102,6 +102,97 @@ def test_admitted_dispatch_keeps_compression_and_evaluation_path(tmp_path, monke
     assert calls == ['compression', 'evaluation']
 
 
+def test_unavailable_miner_requires_fresh_same_model_commitment_and_next_window(tmp_path):
+    active = {MODELS[i]: entry(i) for i in range(3)}
+    triggers = queue(tmp_path, active)
+    triggers.current_block = lambda: 100
+    row = triggers.pending()[0]
+    triggers.start(row['id'], 6)
+    triggers.defer(row['id'], 'MinerUnavailable')
+    assert row['id'] not in {r['id'] for r in triggers.rows()}
+    assert row['id'] not in {r['id'] for r in triggers.pending(100)}
+    saved = dict(triggers.db.execute('SELECT * FROM triggers WHERE id=?', (row['id'],)).fetchone())
+    assert saved['result'] is None and saved['finished_unix'] is None
+    triggers.close()
+    triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3', candidates=lambda: active,
+                                 interruption=lambda window: None)
+    def submit(value, block):
+        triggers.observe([{**entry(0), 'value': value, 'block': block}], {MINERS[0]},
+                         coldkeys={MINERS[0]: 'first'}, uids={MINERS[0]: 0})
+    submit(entry(0)['value'], 1)  # Old chain history cannot requeue.
+    submit(entry(1)['value'], 101)  # Binding cannot change.
+    assert row['id'] not in {r['id'] for r in triggers.rows()}
+    submit(entry(0)['value'], 102)
+    assert row['id'] not in {r['id'] for r in triggers.pending(100, before_block=102)}
+    revived = next(r for r in triggers.pending(100, before_block=103) if r['id'] == row['id'])
+    assert revived['usage'] == 'reserved' and revived['readmission_block'] == 102
+    assert all(revived[k] == row[k] for k in ('hotkey','model_id','value','block'))
+
+
+def test_chain_replay_reactivates_withdrawn_binding_only_after_new_commit(tmp_path, monkeypatch):
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    row = worker.triggers.pending()[0]
+    worker.triggers.start(row['id'], ledger.active['id'])
+    worker.triggers.defer(row['id'], 'MinerUnavailable')
+    worker.update(snapshot(8), start_worker=False)
+    assert row['id'] not in {r['id'] for r in worker.triggers.rows()}
+    advance(worker, ledger, 9, {9: [entry(2, block=9)]})
+    assert next(r for r in worker.triggers.rows() if r['id'] == row['id'])['readmission_block'] == 9
+    assert not worker.triggers.pending(100, before_block=ledger.active['start_block'])
+    advance(worker, ledger, 12)
+    assert row['id'] in {r['id'] for r in worker.triggers.pending(100, before_block=ledger.active['start_block'])}
+
+
+@pytest.mark.parametrize('error,removed', [
+    (ConnectionRefusedError(), True), (TimeoutError(), True),
+    (RuntimeError('judge unavailable'), False), (OSError('insufficient_model_cache_space'), False),
+])
+def test_only_miner_transport_errors_withdraw_challenger(tmp_path, monkeypatch, error, removed):
+    from witness.benchmark.managed_evaluator import MinerUnavailable
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    def fail():
+        raise error
+    before = ledger.usage(worker.hotkey)
+    with pytest.raises(MinerUnavailable if removed else type(error)):
+        worker._miner_io(fail, ledger.active)
+    assert ledger.usage(worker.hotkey) == before and not worker.outbox
+
+
+def test_planned_cancellation_preserves_miner_reservation(tmp_path, monkeypatch):
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    worker.stopping.set()
+    def fail():
+        raise ConnectionRefusedError()
+    with pytest.raises(ConnectionRefusedError):
+        worker._miner_io(fail, ledger.active, preflight=True)
+
+
+def test_readmitted_model_cannot_use_old_panel_in_current_window(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window = ledger.active
+    entry = {**window['candidates'][MODELS[2]], 'readmission_block': 9}
+    worker.compression_check = lambda *args: pytest.fail('readmission bypassed frozen cutoff')
+    with pytest.raises(InterruptedError, match='not_admitted_to_window'):
+        ManagedEvaluator._attempt(worker, entry, window, snapshot(9), set())
+
+
+@pytest.mark.parametrize('baseline', [True, False])
+def test_download_failure_attributed_to_challenger_not_king(tmp_path, monkeypatch, baseline):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator, MinerUnavailable
+    from witness.benchmark.evaluator import Evaluator
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    def download(*args):
+        raise ConnectionRefusedError()
+    worker.download = download
+    monkeypatch.setattr(Evaluator, '_evaluate', lambda self, *a, **k: self.download())
+    window = ledger.active
+    entry = window['king'] if baseline else window['candidates'][MODELS[2]]
+    with pytest.raises(ConnectionRefusedError if baseline else MinerUnavailable):
+        ManagedEvaluator._evaluate(worker, entry, window, snapshot(8), [], [])
+    assert worker.download is download and not worker.outbox
+
+
 @pytest.mark.parametrize('kind', ['window', 'epoch', 'budget', 'stop'])
 @pytest.mark.parametrize('exception', [InterruptedError, TimeoutError])
 def test_expected_cancellation_does_not_back_off_or_consume(tmp_path, monkeypatch, kind, exception):

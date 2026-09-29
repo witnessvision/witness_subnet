@@ -25,6 +25,10 @@ Before the first king is decided, the allocation is **100% burn**.
    before drawing videos. Only immutable submissions committed strictly before
    that block can run. New submissions remain queued for the next window;
    retries and compression recovery cannot add or replace a model in the panel.
+   A failed miner endpoint is removed from the local queue without consuming
+   its hotkey. After repairing it, publish a fresh commitment for the same
+   immutable model to rejoin; admission still waits for a later window opening.
+   Validator, judge and GPU failures retain their normal retry behavior.
 3. **Evaluate:** every two actual subnet epochs, each evaluator privately samples
    **5 videos from a public catalogue of 1,000**, then **2 random 10–30 s clips per
    video**. Luna supplies two references per clip. The king and all challengers
