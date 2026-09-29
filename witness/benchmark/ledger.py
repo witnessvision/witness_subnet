@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import threading
 
-from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide
+from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, policy_identity
 from .submission import challenge_id, parse_submission
 
 
@@ -32,10 +32,50 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS bootstrap_pending (evaluator TEXT, window INTEGER, model TEXT, result TEXT,
                 PRIMARY KEY(evaluator,window,model));''')
         expected = {'block': activation_block, 'epoch': activation_epoch, 'policy': policy}
+        self.versioned_media = policy == policy_identity()
+        previous = self.get('activation')
+        if previous == {**expected, 'policy': LEGACY_POLICY} and self.versioned_media:
+            self._migrate_media_policy(expected)
         if self.get('activation') not in (None, expected):
             raise ValueError('ledger_activation_or_policy_changed_use_explicit_migration')
         self.set('activation', expected)
         path.chmod(0o600)
+
+    def policy_for_window(self, window):
+        return LEGACY_POLICY if self.versioned_media and window < MEDIA_RECOVERY_WINDOW else self.policy
+
+    def _migrate_media_policy(self, expected):
+        """The sole supported transition; reject any already reported affected window.
+
+        Closed pre-transition decisions, king, uses, commitments and cursor remain
+        byte-for-byte intact. Fresh replay uses the same per-window policy schedule.
+        """
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            for row in self.db.execute('SELECT value FROM commitments'):
+                try:
+                    result = Result.parse(row[0])
+                except ValueError:
+                    continue
+                if result.window >= MEDIA_RECOVERY_WINDOW:
+                    raise ValueError('media_migration_requires_unreported_windows')
+            affected = list(self.db.execute('SELECT id,opening,decision FROM windows WHERE id>=?',
+                                           (MEDIA_RECOVERY_WINDOW,)))
+            for row in affected:
+                if row['decision']:
+                    raise ValueError('media_migration_requires_unclosed_windows')
+                opening = json.loads(row['opening'])
+                opening['policy_hash'] = self.policy
+                self.db.execute('UPDATE windows SET opening=? WHERE id=?', (json.dumps(opening), row['id']))
+                if self.active and self.active['id'] == row['id']:
+                    self.set('active', opening)
+            self.set('policy_migration', {'from': LEGACY_POLICY, 'to': self.policy,
+                                         'first_window': MEDIA_RECOVERY_WINDOW, 'cursor': self.cursor})
+            self.set('activation', expected)
+            self.db.execute('COMMIT')
+        except BaseException:
+            self.db.execute('ROLLBACK')
+            raise
 
     def get(self, key, default=None):
         with self.lock:
@@ -130,7 +170,7 @@ class Ledger:
         opening = {'id': window, 'start_block': snapshot['block'],
                    'start_epoch': self.activation_epoch + WINDOW_EPOCHS * window,
                    'end_epoch': self.activation_epoch + WINDOW_EPOCHS * (window + 1),
-                   'king': king, 'candidates': candidates, 'state': 'open', 'policy_hash': self.policy}
+                   'king': king, 'candidates': candidates, 'state': 'open', 'policy_hash': self.policy_for_window(window)}
         self.db.execute('INSERT INTO windows VALUES (?,?,NULL)', (window, json.dumps(opening)))
         self.set('active', opening)
 
@@ -152,7 +192,7 @@ class Ledger:
                 active = self.active
                 if active and window != active['id']:
                     decision = decide(self._voting_history(active, block), window=active['id'],
-                                      policy=self.policy, king=active['king'],
+                                      policy=active['policy_hash'], king=active['king'],
                                       candidates=active['candidates'], snapshot=snapshot)
                     decision.update(block=block, block_hash=snapshot['block_hash'], end_epoch=epoch)
                     self.db.execute('UPDATE windows SET decision=? WHERE id=?', (json.dumps(decision), active['id']))
@@ -194,7 +234,7 @@ class Ledger:
                     except ValueError:
                         continue
                     candidate = active['candidates'].get(result.model_id)
-                    if (result.window != window or result.policy != self.policy[:24] or result.flags & (BASELINE | EARLY_STOP)
+                    if (result.window != window or result.policy != active['policy_hash'][:24] or result.flags & (BASELINE | EARLY_STOP)
                             or candidate is None or result.uid != candidate['uid']
                             or row['hotkey'] not in snapshot['validators']):
                         continue

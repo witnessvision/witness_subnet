@@ -294,6 +294,8 @@ def test_offline_runpod_cleanup_never_starts_or_rents_compute(tmp_path):
         gpu.remove_models([MODELS[0]])
 
 
-def test_cleanup_keeps_existing_mainnet_policy_identity():
+def test_media_recovery_has_explicit_versioned_policy_identity():
     from witness.benchmark.protocol import policy_identity
-    assert policy_identity() == 'd063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918'
+    from witness.benchmark.protocol import LEGACY_POLICY, MEDIA_RECOVERY_WINDOW
+    assert policy_identity() != LEGACY_POLICY
+    assert MEDIA_RECOVERY_WINDOW == 9

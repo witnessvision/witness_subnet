@@ -23,13 +23,25 @@ from witness.events import content_hash
 from witness.storage import sha256_file, store_immutable, write_private
 from .annotate import label_clip
 from .archive import request
-from .contract import Policy
+from .contract import InfrastructureError, Policy
 from .media import PREPROCESSOR_ID, render_clip, probe
 from .execution import run_process
 from .reward import EVAL, windows
 from .runner import audio_evidence
 
 AUDIO_BATCH = 200  # clips per GPU job
+# Only intrinsic media failures justify a replacement. Network, labeling and
+# evaluator failures retry the same source, without consuming a miner attempt.
+PERMANENT_MEDIA_ERRORS = {
+    "missing_audio_or_video", "rendered_clip_duration_mismatch", "clip_outside_source",
+}
+
+
+def _invalid_media(row: dict) -> bool:
+    return row.get("status") == "too_short" or (
+        row.get("status") == "failed" and row.get("error", "") in
+        {"ValueError: " + error for error in PERMANENT_MEDIA_ERRORS})
+
 
 
 def _salt(root: Path) -> str:
@@ -93,10 +105,11 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_u
     complete = {video["identifier"] for video in videos
                 if sum(r["video"] == video["identifier"] and r["status"] == "ok" for r in rows)
                 == EVAL.clips_per_video}
-    rows = [row for row in rows if row["video"] in complete]
+    rows = [row for row in rows if row["video"] in complete or _invalid_media(row)]
     rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     rows_path.chmod(0o600)
-    todo = [video for video in videos if video["identifier"] not in complete]
+    invalid = {row["video"] for row in rows if _invalid_media(row)}
+    todo = [video for video in videos if video["identifier"] not in complete | invalid]
     salt = salt or _salt(root)
 
     def cut(video):
@@ -185,10 +198,56 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
     target = root / "windows" / str(window)
     store_immutable(target / "draw.json", {"window": window, "validator": validator,
                                            "selected": selected, "seed_hash": content_hash(salt)})
-    build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log, source_urls=source_urls)
+    # Retain the original draw. Replacements have an independent, reproducible
+    # reserve order and occupy the rejected video's position, never score order.
+    initial = selected
+    reserve = [v for v in videos if v not in initial]
+    random.Random(content_hash({"salt": salt, "reserve": "media-v1"})).shuffle(reserve)
+    rejection_path = root / "media-rejections.json"
+    rejected = json.loads(rejection_path.read_text()) if rejection_path.exists() else {}
+    selected_path = target / "selected.json"
+    if selected_path.exists():
+        chosen = json.loads(selected_path.read_text())
+        selected = chosen["selected"]
+        if chosen["seed_hash"] != content_hash(salt) or len(selected) != EVAL.videos:
+            raise InfrastructureError("window_selection_binding_failed")
+    else:
+        selected = list(initial)
+    def reject_key(video):
+        return content_hash(video)  # source identity includes file, size and catalogue metadata
+    while True:
+        bad = {v["identifier"] for v in selected if reject_key(v) in rejected}
+        if not bad:
+            build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log, source_urls=source_urls)
+            path = target / "clips.jsonl"
+            failures = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+            for video in selected:
+                failure = next((r for r in failures if r["video"] == video["identifier"] and _invalid_media(r)), None)
+                if failure:
+                    rejected[reject_key(video)] = {"video": video["identifier"], "window": window,
+                                                  "reason": failure.get("error", failure["status"])}
+                    bad.add(video["identifier"])
+            if bad:
+                write_private(rejection_path, rejected)
+        if not bad:
+            break
+        if selected_path.exists():
+            # A locked batch may already have been scored. Never amend it.
+            raise InfrastructureError("locked_window_media_invalid")
+        available = [v for v in reserve if reject_key(v) not in rejected and v not in selected]
+        for index, video in enumerate(selected):
+            if video["identifier"] in bad:
+                if not available:
+                    raise InfrastructureError("window_media_reserve_exhausted")
+                selected[index] = available.pop(0)
+        if getattr(gpu, "cancelled", lambda: False)() or getattr(gpu, "remaining_s", lambda: float("inf"))() <= 0:
+            raise InfrastructureError("window_media_preparation_interrupted")
+        log(json.dumps({"stage": "media_replacement", "window": window, "rejected": sorted(bad)}))
     rows = load_pool(target, policy)
     if len(rows) != EVAL.videos * EVAL.clips_per_video:
-        raise RuntimeError("window_batch_incomplete")
+        raise InfrastructureError("window_batch_incomplete")
+    store_immutable(selected_path, {"selected": selected, "seed_hash": content_hash(salt),
+                                    "sampling": "media-reserve-v1"})
     order = {v['identifier']: i for i, v in enumerate(selected)}
     # Download completion order depends on content/length. The statistical look
     # must instead follow the original uniform random draw, grouped by video.

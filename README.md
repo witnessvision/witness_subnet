@@ -25,6 +25,15 @@ Before the first king is decided, the allocation is **100% burn**.
    **5 videos from a public catalogue of 1,000**, then **2 random 10–30 s clips per
    video**. Luna supplies two references per clip. The king and all challengers
    admitted to that window share its batch. The king runs once per window.
+   From window 9, sources missing audio/video, too short for the required clips,
+   or with invalid clip bounds/duration are excluded before model evaluation.
+   An independently seeded deterministic reserve supplies replacements in the
+   original draw positions. Rejections persist by catalogue source identity;
+   retries reuse valid clips and references. Network, labeling and evaluator
+   failures retry the same source. The final 5-video batch is immutable.
+   The policy transition preserves finalized windows 0–8 and their king/uses.
+   An existing ledger upgrades only if affected windows have no published
+   results or closed decisions; other policy changes require explicit migration.
 4. **Publish:** publish compact per-model quality, reward and paired king scores
    through chain commitments before deciding weights. Followers replay every
    finalized block; the latest commitment alone is insufficient.
