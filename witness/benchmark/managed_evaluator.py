@@ -427,6 +427,7 @@ class ManagedEvaluator(Evaluator):
                         or self.context[0]['id'] != window['id'])
         def acquire(cancel, remaining):
             began=time.monotonic()
+            started_unix=time.time()
             error=None
             try:
                 if self.compression_check is None:
@@ -438,10 +439,13 @@ class ManagedEvaluator(Evaluator):
                 raise
             finally:
                 try:
-                    write_private(self.root/'prefetch-status.json', {'status':'failed' if error else 'ready',
+                    receipt={'status':'failed' if error else 'ready',
                         'uid':candidate['uid'],'model_id':candidate['model_id'],'window_id':window['id'],
                         'elapsed_s':time.monotonic()-began,'error_type':type(error).__name__ if error else None,
-                        'unix':time.time()})
+                        'started_unix':started_unix,'finished_unix':time.time(),'unix':time.time()}
+                    write_private(self.root/'prefetch-status.json',receipt)
+                    write_private(self.root/'performance'/str(window['id'])/
+                                  (candidate['model_id']+'.prefetch.json'),receipt)
                 except OSError:
                     pass
         write_private(self.root/'prefetch-status.json',{'status':'downloading','uid':candidate['uid'],

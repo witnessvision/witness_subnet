@@ -40,9 +40,15 @@ class Performance:
                 'active_s':previous.get('active_s',0.)+elapsed,'cumulative_phases_s':cumulative,
                 'latest':row,'status':status}
         data['wall_s'] = row['finished_unix']-data['first_started_unix']
-        samples=previous.get('clip_samples',[])+self.clips
-        data['clip_samples']=samples[-2000:]
-        measured=sorted(r['elapsed_s'] for r in samples if not r.get('reused'))
+        prefetch=path.with_suffix('.prefetch.json')
+        if prefetch.exists():
+            data['prefetch']=json.loads(prefetch.read_text())
+            data['wall_from_prefetch_start_s']=row['finished_unix']-data['prefetch']['started_unix']
+        samples={}
+        for sample in previous.get('clip_samples',[])+self.clips:
+            samples.setdefault((sample['model_id'],sample['task_id']),sample)
+        data['clip_samples']=list(samples.values())[-2000:]
+        measured=sorted(r['elapsed_s'] for r in data['clip_samples'])
         if measured:
             data['clip_latency_s']={'count':len(measured),'p50':measured[math.ceil(len(measured)*.5)-1],
                                    'p95':measured[math.ceil(len(measured)*.95)-1],'max':measured[-1]}

@@ -122,11 +122,11 @@ def test_performance_records_cumulative_active_wall_and_percentiles(tmp_path):
     e=entry(0);window={'id':13}
     first=Performance(tmp_path,e,window)
     with first.phase('download'):time.sleep(.01)
-    first.clips=[{'elapsed_s':2.,'status':'ok','reused':False}]
+    first.clips=[{'model_id':'m','task_id':'a','elapsed_s':2.,'status':'ok','reused':False}]
     a=first.finish('deferred',RuntimeError())
     time.sleep(.01)
     second=Performance(tmp_path,e,window)
-    second.clips=[{'elapsed_s':2.,'status':'ok','reused':True},{'elapsed_s':3.,'status':'ok','reused':False}]
+    second.clips=[{'model_id':'m','task_id':'a','elapsed_s':2.,'status':'ok','reused':True},{'model_id':'m','task_id':'b','elapsed_s':3.,'status':'ok','reused':False}]
     b=second.finish('evaluation_ready_for_publication')
     assert b['attempts']==2 and b['active_s']>a['active_s']
     assert b['wall_s']>b['active_s'] and b['clip_latency_s']=={'count':2,'p50':2.,'p95':3.,'max':3.}
