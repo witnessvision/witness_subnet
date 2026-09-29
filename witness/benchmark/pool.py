@@ -1,6 +1,7 @@
 """Private audiovisual pools and fresh mainnet windows.
 
-Mainnet window_batch samples five videos from catalogue-v2 and two random clips
+Mainnet window_batch samples ten catalogue-v2 videos from window 12 (five before)
+and two random clips
 per video, sharing that batch across the king and challengers. Retries retain
 the private draw; a new window creates a fresh draw and two Luna references per
 clip. build_pool processes only the explicitly supplied source selection.
@@ -26,7 +27,7 @@ from .archive import request
 from .contract import InfrastructureError, Policy
 from .media import PREPROCESSOR_ID, render_clip, probe
 from .execution import run_process
-from .reward import EVAL, windows
+from .reward import EVAL, eval_for_window, windows
 from .runner import audio_evidence
 
 AUDIO_BATCH = 200  # clips per GPU job
@@ -91,7 +92,7 @@ def _cut(root: Path, video: dict, salt: str, *, cancelled=lambda: False, remaini
     return rows
 
 
-def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_urls=None) -> dict:
+def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_urls=None, spec=EVAL) -> dict:
     """Build or complete the pool; every stage skips what is already on disk."""
     for name in ("src", "clips", "references", "evidence", "labeling"):
         (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -104,7 +105,7 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_u
     lock = threading.Lock()
     complete = {video["identifier"] for video in videos
                 if sum(r["video"] == video["identifier"] and r["status"] == "ok" for r in rows)
-                == EVAL.clips_per_video}
+                == spec.clips_per_video}
     rows = [row for row in rows if row["video"] in complete or _invalid_media(row)]
     rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     rows_path.chmod(0o600)
@@ -154,31 +155,31 @@ def build_pool(root: Path, *, gpu, api, selected, log=print, salt=None, source_u
         write_private(root / "labeling" / f"{row['file']}.{labeling}.receipt.json", receipt)
         log(json.dumps({"stage": "label", "file": row["file"], "labeling": labeling, "facts": receipt["facts_kept"]}))
     with ThreadPoolExecutor(4) as pool:
-        list(pool.map(label, [(row, k) for row in clips for k in range(EVAL.references)]))
+        list(pool.map(label, [(row, k) for row in clips for k in range(spec.references)]))
     labeled = [{key: row[key] for key in ("video", "creator_group", "index", "start", "file", "clip_sha256", "duration")}
                for row in clips if all((root / "references" / f"{row['clip_sha256']}.{k}.json").exists()
-                                       for k in range(EVAL.references))]
+                                       for k in range(spec.references))]
     manifest = {"schema_version": "witness-eval-pool-4", "slice_hash": content_hash(videos),
-                "eval": EVAL.identity, "preprocessing_hash": PREPROCESSOR_ID,
+                "eval": spec.identity, "preprocessing_hash": PREPROCESSOR_ID,
                 "videos": len({row["video"] for row in labeled}), "clips": labeled}
     write_private(root / "pool.json", manifest)
     return {"videos": manifest["videos"], "clips": len(labeled), "unlabeled": len(clips) - len(labeled),
             "failed_videos": sum(row["status"] != "ok" for row in rows)}
 
 
-def load_pool(root: Path, policy: Policy) -> list[dict]:
-    """Pool rows whose clip and all ``EVAL.references`` references exist, built with this ``EVAL``."""
+def load_pool(root: Path, policy: Policy, *, spec=EVAL) -> list[dict]:
+    """Pool rows whose clip and all ``spec.references`` references exist, built with this ``EVAL``."""
     manifest = json.loads((root / "pool.json").read_text())
-    if manifest.get("eval") != EVAL.identity:
+    if manifest.get("eval") != spec.identity:
         raise ValueError("evaluation_pool_built_with_another_eval_spec")
     rows = []
     for row in manifest["clips"]:
-        references = [root / "references" / f"{row['clip_sha256']}.{k}.json" for k in range(EVAL.references)]
+        references = [root / "references" / f"{row['clip_sha256']}.{k}.json" for k in range(spec.references)]
         media = root / "clips" / row["file"]
         if (media.is_file() and sha256_file(media) == row["clip_sha256"]
                 and all(path.is_file() for path in references)):
             rows.append({**row, "media_path": str(media), "reference_paths": [str(path) for path in references]})
-    if len({row["video"] for row in rows}) < EVAL.videos:
+    if len({row["video"] for row in rows}) < spec.videos:
         raise ValueError("evaluation_pool_too_small")
     return rows
 
@@ -187,14 +188,15 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
                  catalogue: Path | None = None, log=print, source_urls=None) -> list[dict]:
     """One fresh private draw per evaluator/window, stable across retries/restarts."""
     import random
+    spec = eval_for_window(window)
     catalogue = catalogue or Path(__file__).parent / "data" / "catalogue-v2.json"
     videos = json.loads(catalogue.read_text())["videos"]
     if len(videos) != 1000 or len({v["identifier"] for v in videos}) != 1000:
         raise ValueError("mainnet_catalogue_requires_1000_distinct_videos")
     secret = _salt(root)
     salt = content_hash({"secret": secret, "validator": validator, "window": window,
-                         "catalogue": content_hash(videos), "sampling": EVAL.sampling})
-    selected = random.Random(salt).sample(videos, EVAL.videos)
+                         "catalogue": content_hash(videos), "sampling": spec.sampling})
+    selected = random.Random(salt).sample(videos, spec.videos)
     target = root / "windows" / str(window)
     store_immutable(target / "draw.json", {"window": window, "validator": validator,
                                            "selected": selected, "seed_hash": content_hash(salt)})
@@ -209,7 +211,7 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
     if selected_path.exists():
         chosen = json.loads(selected_path.read_text())
         selected = chosen["selected"]
-        if chosen["seed_hash"] != content_hash(salt) or len(selected) != EVAL.videos:
+        if chosen["seed_hash"] != content_hash(salt) or len(selected) != spec.videos:
             raise InfrastructureError("window_selection_binding_failed")
     else:
         selected = list(initial)
@@ -218,7 +220,7 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
     while True:
         bad = {v["identifier"] for v in selected if reject_key(v) in rejected}
         if not bad:
-            build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log, source_urls=source_urls)
+            build_pool(target, gpu=gpu, api=api, selected=selected, salt=salt, log=log, source_urls=source_urls, spec=spec)
             path = target / "clips.jsonl"
             failures = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
             for video in selected:
@@ -243,8 +245,8 @@ def window_batch(root: Path, window: int, validator: str, *, gpu, api, policy: P
         if getattr(gpu, "cancelled", lambda: False)() or getattr(gpu, "remaining_s", lambda: float("inf"))() <= 0:
             raise InfrastructureError("window_media_preparation_interrupted")
         log(json.dumps({"stage": "media_replacement", "window": window, "rejected": sorted(bad)}))
-    rows = load_pool(target, policy)
-    if len(rows) != EVAL.videos * EVAL.clips_per_video:
+    rows = load_pool(target, policy, spec=spec)
+    if len(rows) != spec.videos * spec.clips_per_video:
         raise InfrastructureError("window_batch_incomplete")
     store_immutable(selected_path, {"selected": selected, "seed_hash": content_hash(salt),
                                     "sampling": "media-reserve-v1"})

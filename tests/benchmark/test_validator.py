@@ -311,7 +311,7 @@ def test_gpu_cap_stops_busy_pod_and_failed_stop_keeps_clock(tmp_path, monkeypatc
 
 def test_reward_averages_videos_and_random_batch_defaults():
     from witness.benchmark.reward import EVAL, windows, video_scores, eval_score, clip_reward
-    assert (EVAL.videos, EVAL.clips_per_video, EVAL.references) == (5, 2, 2)
+    assert (EVAL.videos, EVAL.clips_per_video, EVAL.references) == (10, 2, 2)
     assert windows('a', 100, 'a'*64) != windows('a', 100, 'b'*64)
     assert len(windows('a', 100, 'a'*64)) == 2
     assert clip_reward(0, 1, valid=True) == 0 and clip_reward(1, 0, valid=True) == .8
@@ -462,7 +462,7 @@ def test_fresh_window_sampling_is_private_and_restart_stable(tmp_path, monkeypat
     def build(target, *, selected, salt, **kwargs):
         draws.append((selected, salt))
     monkeypatch.setattr(pool, 'build_pool', build)
-    monkeypatch.setattr(pool, 'load_pool', lambda *a: [dict(video=v['identifier'], index=i)
+    monkeypatch.setattr(pool, 'load_pool', lambda *a, **kwargs: [dict(video=v['identifier'], index=i)
                         for v in reversed(draws[-1][0]) for i in (1, 0)])
     for window in (1, 1, 2):
         rows = pool.window_batch(tmp_path, window, VALS[0], gpu=None, api=None, policy=None)

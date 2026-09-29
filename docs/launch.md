@@ -48,7 +48,7 @@ writes until the corresponding checks below have measured evidence.
 - **Authenticated download:** a real miner endpoint accepts an eligible signed
   validator request, rejects a wrong key/receiver/replay/low-alpha request,
   resumes interrupted files and matches all hashes. Default gate: 100,000 alpha.
-- **Sampling and scoring:** five real public sources, two fresh clips each and two
+- **Sampling and scoring:** ten real public sources, two fresh clips each and two
   references each, correct control scores, one cached king evaluation and several
   queued challengers on the same window batch. Record actual throughput and costs;
   do not infer them from mock tests or historical unrelated runs.
@@ -56,7 +56,7 @@ writes until the corresponding checks below have measured evidence.
   expiry on the real GPU, including during load/warmup. Exercise a three-video
   statistical cut, a later full continuation prompted by another evaluator,
   and an unresolved partial at window close. Measure false-cut frequency against
-  complete five-video outcomes; synthetic combinatorics are not model calibration.
+  complete ten-video outcomes; synthetic combinatorics are not model calibration.
 - **Chain rehearsal:** publish all compact records on an authorized test network,
   overwrite latest commitments, restart followers, replay historical records and
   recover identical decisions. Test failures and the unknown-extrinsic recovery

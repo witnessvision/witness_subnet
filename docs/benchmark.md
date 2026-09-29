@@ -8,7 +8,7 @@ and epoch. Finalized chain history determines boundaries and submissions.
 Candidates must be registered and committed strictly before the opening block;
 new submissions enter the next window. The incumbent king is frozen at opening.
 
-Each evaluator independently samples five distinct videos from
+Each evaluator independently samples ten distinct videos from window 12 (five before that) from
 [`catalogue-v2.json`](../witness/benchmark/data/catalogue-v2.json), containing
 1,000 public-source metadata entries. A private persistent secret, evaluator
 hotkey and window ID determine the draw and random clip intervals. Each video
@@ -53,17 +53,18 @@ instead of quietly turning into a zero.
 
 ## Early stopping and execution budget
 
-The king always completes all five videos in one model job. Challenger inference
-runs the first three videos in one job and, only if needed, the last two in a
+The king always completes all ten videos in one model job. Challenger inference
+runs the first three videos in one job and, only if needed, the remaining seven in a
 second job; it does not reload the model for every video. Grading follows the
 original random draw order, never download-completion order. A deterministic best-possible-completion bound
 may stop a challenger that cannot clear the paired margin even with perfect
 remaining answers.
 
 There is also **one** statistical look, after three complete videos. If `m` is
-their largest video reward, `(1 + 4*m) / 5` is a one-sided 90% upper confidence
-bound for this fixed five-video batch's mean reward: a uniform sample of three
-misses both largest rewards in exactly `1 / choose(5, 3) = 0.1` of draws. Stop
+their largest video reward, `(4 + 6*m) / 10` is a one-sided upper confidence
+bound of at least 90% for the fixed ten-video batch: the chance of missing the
+largest five is `choose(5,3) / choose(10,3) = 10/120`, below 0.1. The earlier
+five-video windows retain `(1 + 4*m) / 5`. Stop
 only if the smaller of this and the deterministic bound cannot beat the king
 by `0.02`, with upward-rounded bounds in the chain representation. There is no
 extra statistical look after each clip or after four videos. No normality,

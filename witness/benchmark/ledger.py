@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import threading
 
-from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, policy_identity
+from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, FIVE_VIDEO_POLICY, TEN_VIDEO_WINDOW, policy_identity
 from .submission import challenge_id, parse_submission
 
 
@@ -34,22 +34,28 @@ class Ledger:
         expected = {'block': activation_block, 'epoch': activation_epoch, 'policy': policy}
         self.versioned_media = policy == policy_identity()
         previous = self.get('activation')
-        if previous == {**expected, 'policy': LEGACY_POLICY} and self.versioned_media:
-            self._migrate_media_policy(expected)
+        if (previous and previous['block'] == activation_block and previous['epoch'] == activation_epoch
+                and previous['policy'] in (LEGACY_POLICY, FIVE_VIDEO_POLICY) and self.versioned_media):
+            self._migrate_media_policy(expected, previous['policy'])
         if self.get('activation') not in (None, expected):
             raise ValueError('ledger_activation_or_policy_changed_use_explicit_migration')
         self.set('activation', expected)
         path.chmod(0o600)
 
     def policy_for_window(self, window):
-        return LEGACY_POLICY if self.versioned_media and window < MEDIA_RECOVERY_WINDOW else self.policy
+        if not self.versioned_media:
+            return self.policy
+        if window < MEDIA_RECOVERY_WINDOW:
+            return LEGACY_POLICY
+        return FIVE_VIDEO_POLICY if window < TEN_VIDEO_WINDOW else self.policy
 
-    def _migrate_media_policy(self, expected):
+    def _migrate_media_policy(self, expected, previous_policy):
         """The sole supported transition; reject any already reported affected window.
 
         Closed pre-transition decisions, king, uses, commitments and cursor remain
         byte-for-byte intact. Fresh replay uses the same per-window policy schedule.
         """
+        first_window = MEDIA_RECOVERY_WINDOW if previous_policy == LEGACY_POLICY else TEN_VIDEO_WINDOW
         self.db.execute('BEGIN IMMEDIATE')
         try:
             for row in self.db.execute('SELECT value FROM commitments'):
@@ -57,20 +63,20 @@ class Ledger:
                     result = Result.parse(row[0])
                 except ValueError:
                     continue
-                if result.window >= MEDIA_RECOVERY_WINDOW:
+                if result.window >= first_window:
                     raise ValueError('media_migration_requires_unreported_windows')
             affected = list(self.db.execute('SELECT id,opening,decision FROM windows WHERE id>=?',
-                                           (MEDIA_RECOVERY_WINDOW,)))
+                                           (first_window,)))
             for row in affected:
                 if row['decision']:
                     raise ValueError('media_migration_requires_unclosed_windows')
                 opening = json.loads(row['opening'])
-                opening['policy_hash'] = self.policy
+                opening['policy_hash'] = self.policy_for_window(row['id'])
                 self.db.execute('UPDATE windows SET opening=? WHERE id=?', (json.dumps(opening), row['id']))
                 if self.active and self.active['id'] == row['id']:
                     self.set('active', opening)
-            self.set('policy_migration', {'from': LEGACY_POLICY, 'to': self.policy,
-                                         'first_window': MEDIA_RECOVERY_WINDOW, 'cursor': self.cursor})
+            self.set('policy_migration', {'from': previous_policy, 'to': self.policy,
+                                         'first_window': first_window, 'cursor': self.cursor})
             self.set('activation', expected)
             self.db.execute('COMMIT')
         except BaseException:

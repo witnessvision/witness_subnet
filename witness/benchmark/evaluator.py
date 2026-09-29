@@ -12,7 +12,7 @@ from witness.storage import write_private
 from .contract import InfrastructureError, Policy
 from .duel import cases, grade
 from .protocol import BASELINE, CONTROLS_OK, EARLY_STOP, REJECTED, Result, decide, quantize
-from .reward import EVAL, eval_score, judge_clip, video_scores
+from .reward import EVAL, eval_for_window, eval_score, judge_clip, video_scores
 from .stopping import futility, upper_units
 from .round import controls
 from .submission import parse_submission, verify_directory
@@ -111,7 +111,7 @@ class Evaluator:
 
     def progress(self, stage, window, model=None, completed=0):
         write_private(self.root / 'progress.json', {'stage': stage, 'window_id': window['id'],
-                      'model_id': model, 'completed_clips': completed, 'total_clips': 10,
+                      'model_id': model, 'completed_clips': completed, 'total_clips': eval_for_window(window['id']).videos * EVAL.clips_per_video,
                       'updated_unix': time.time()})
 
     def update(self, snapshot, *, start_worker=True):
@@ -187,16 +187,17 @@ class Evaluator:
                     or (self.attempt_epoch is not None and self.context[1]['epoch_index'] != self.attempt_epoch))
 
     def _batch(self, window):
+        spec = eval_for_window(window['id'])
         root = self.root / 'windows' / str(window['id'])
         path = root / 'batch.json'
         rows = json.loads(path.read_text()) if path.exists() else self.batch_factory(window)
-        if len(rows) != EVAL.videos * EVAL.clips_per_video or len({r['video'] for r in rows}) != EVAL.videos:
+        if len(rows) != spec.videos * spec.clips_per_video or len({r['video'] for r in rows}) != spec.videos:
             raise InfrastructureError('incorrect_window_batch')
-        videos = [row['video'] for row in rows[::EVAL.clips_per_video]]
-        if len(set(videos)) != EVAL.videos or any(
-                [r['index'] for r in rows[i:i + EVAL.clips_per_video]] != list(range(EVAL.clips_per_video))
-                or len({r['video'] for r in rows[i:i + EVAL.clips_per_video]}) != 1
-                for i in range(0, len(rows), EVAL.clips_per_video)):
+        videos = [row['video'] for row in rows[::spec.clips_per_video]]
+        if len(set(videos)) != spec.videos or any(
+                [r['index'] for r in rows[i:i + spec.clips_per_video]] != list(range(spec.clips_per_video))
+                or len({r['video'] for r in rows[i:i + spec.clips_per_video]}) != 1
+                for i in range(0, len(rows), spec.clips_per_video)):
             raise InfrastructureError('window_batch_not_grouped_by_random_video_order')
         selected = cases(rows, self.policy, str(window['id']))
         check = root / 'controls.json'
@@ -216,6 +217,7 @@ class Evaluator:
         return rows, selected
 
     def _evaluate(self, entry, window, snapshot, rows, selected, *, baseline=None, resume=False):
+        spec = eval_for_window(window['id'])
         model_id = entry['model_id']
         root = self.root / 'windows' / str(window['id'])
         path = root / 'models' / model_id / 'score.json'
@@ -244,12 +246,12 @@ class Evaluator:
         progress = json.loads(progress_path.read_text()) if progress_path.exists() else {}
         grades = list(progress.get('grades', cached['grades'] if cached else []))
         resume = resume or progress.get('continue_to_full', False)
-        if (len(grades) % EVAL.clips_per_video or len(grades) > len(rows)
+        if (len(grades) % spec.clips_per_video or len(grades) > len(rows)
                 or [r['id'] for r in grades] != [c.task.clip_sha256 for c, _ in selected[:len(grades)]]):
             raise InfrastructureError('cached_progress_binding_failed')
         stopped = None
         first = len(grades)
-        boundaries = [3 * EVAL.clips_per_video, len(rows)] if baseline and not resume and first < 6 else [len(rows)]
+        boundaries = [3 * spec.clips_per_video, len(rows)] if baseline and not resume and first < 6 else [len(rows)]
         for last in boundaries:
             if last <= first:
                 continue
@@ -274,11 +276,11 @@ class Evaluator:
                 grades.append({**value, 'id': case.task.clip_sha256, 'duration': case.task.duration,
                                'start': row['start'], 'file': row['file']})
                 self.progress('judging', window, model_id, len(grades))
-                if len(grades) % EVAL.clips_per_video == 0:
+                if len(grades) % spec.clips_per_video == 0:
                     write_private(progress_path, {'grades': grades, 'continue_to_full': resume})
             first = last
             if baseline and not resume:
-                stopped = futility(list(video_scores(grades).values()), baseline['reward'])
+                stopped = futility(list(video_scores(grades).values()), baseline['reward'], planned_videos=spec.videos)
                 if stopped:
                     break
         videos = video_scores(grades)

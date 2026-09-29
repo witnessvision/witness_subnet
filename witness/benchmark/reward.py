@@ -46,7 +46,7 @@ TAIL_S = .5  # never sampled at the very end of a video
 
 class EvalSpec(StrictModel):
     sampling: str = "witness-window-v2"
-    videos: int = Field(default=5, ge=1)
+    videos: int = Field(default=10, ge=1)
     clips_per_video: int = Field(default=2, ge=1)
     references: int = Field(default=2, ge=1)
     clip_weight: float = Field(default=.8, ge=0, le=1)
@@ -58,6 +58,11 @@ class EvalSpec(StrictModel):
 
 
 EVAL = EvalSpec()
+
+
+def eval_for_window(window: int) -> EvalSpec:
+    from .protocol import TEN_VIDEO_WINDOW
+    return EvalSpec(videos=5) if window < TEN_VIDEO_WINDOW else EVAL
 
 
 def windows(identifier: str, length: float, salt: str, spec: EvalSpec = EVAL) -> list[tuple[int, float, float]]:

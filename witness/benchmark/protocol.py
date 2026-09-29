@@ -23,6 +23,8 @@ SCALE = 65535
 WINDOW_EPOCHS = 2
 # Explicit mainnet transition: windows 0..8 retain the finalized v2 policy.
 MEDIA_RECOVERY_WINDOW = 9
+TEN_VIDEO_WINDOW = 12
+FIVE_VIDEO_POLICY = "4623a70ac9c406d8af341390cb25e7d22b29cada7b1b78929d6303cbc27bd239"
 LEGACY_POLICY = "d063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918"
 BURN_FRACTION = .7
 CONTROLS_OK, REJECTED, BASELINE, EARLY_STOP = 1, 2, 4, 8
@@ -140,9 +142,10 @@ def policy_identity() -> str:
     return content_hash({"protocol": "witness-mainnet-2", "files": hashes,
                          "catalogue": hashlib.sha256(catalog.read_bytes()).hexdigest() if catalog.exists() else None,
                          "media_recovery": "deterministic-reserve-v1-from-window-9",
-                         "window_epochs": WINDOW_EPOCHS, "videos": 5, "clips": 2, "references": 2,
+                         "ten_video_window": TEN_VIDEO_WINDOW, "five_video_policy": FIVE_VIDEO_POLICY,
+                         "window_epochs": WINDOW_EPOCHS, "videos": 10, "clips": 2, "references": 2,
                          "clip_timeout_s": 60,
-                         "early_stop": "finite-batch-90-one-look-after-three",
+                         "early_stop": "finite-batch-90-one-look-after-three-generalized",
                          "burn_fraction": BURN_FRACTION,
                          "label_model": "gpt-6-luna", "judge_model": "gpt-5.6-terra",
                          "margin": .02, "controls_max": .05, "quality_floor": .05})

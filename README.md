@@ -30,7 +30,7 @@ Before the first king is decided, the allocation is **100% burn**.
    immutable model to rejoin; admission still waits for a later window opening.
    Validator, judge and GPU failures retain their normal retry behavior.
 3. **Evaluate:** every two actual subnet epochs, each evaluator privately samples
-   **5 videos from a public catalogue of 1,000**, then **2 random 10–30 s clips per
+   **10 videos from a public catalogue of 1,000** (from window 12; earlier windows retain 5), then **2 random 10–30 s clips per
    video**. Luna supplies two references per clip. The king and all challengers
    admitted to that window share its batch. The king runs once per window.
    From window 9, sources missing audio/video, too short for the required clips,
@@ -38,8 +38,8 @@ Before the first king is decided, the allocation is **100% burn**.
    An independently seeded deterministic reserve supplies replacements in the
    original draw positions. Rejections persist by catalogue source identity;
    retries reuse valid clips and references. Network, labeling and evaluator
-   failures retry the same source. The final 5-video batch is immutable.
-   The policy transition preserves finalized windows 0–8 and their king/uses.
+   failures retry the same source. The final window batch is immutable.
+   The ten-video transition preserves windows 0–11 and their king/uses.
    An existing ledger upgrades only if affected windows have no published
    results or closed decisions; other policy changes require explicit migration.
 4. **Publish:** publish compact per-model quality, reward and paired king scores

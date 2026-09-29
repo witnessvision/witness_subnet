@@ -8,7 +8,7 @@ import pytest
 from witness.benchmark import pool
 from witness.benchmark.contract import InfrastructureError
 from witness.benchmark.ledger import Ledger
-from witness.benchmark.protocol import LEGACY_POLICY, Result, policy_identity
+from witness.benchmark.protocol import LEGACY_POLICY, FIVE_VIDEO_POLICY, Result, policy_identity
 from witness.benchmark.submission import Submission, challenge_id
 from witness.storage import write_private
 
@@ -29,7 +29,7 @@ def fake_preparation(monkeypatch, *, failures, calls):
             else:
                 rows.extend(dict(video=name, status='ok', index=i) for i in range(2))
         path.write_text(''.join(json.dumps(r)+'\n' for r in rows))
-    def load(target, policy):
+    def load(target, policy, **kwargs):
         rows = [json.loads(x) for x in (target/'clips.jsonl').read_text().splitlines()]
         good = [r for r in rows if r['status']=='ok']
         if len(good)!=10:
@@ -125,7 +125,7 @@ def test_migration_equals_fresh_replay_preserves_king_closed_history_and_uses(tm
     assert migrated.usage('validator')==fresh.usage('validator')==uses
     assert [tuple(r) for r in migrated.db.execute('SELECT id,opening,decision FROM windows WHERE id<9')]==[tuple(r) for r in closed]
     assert migrated.active==fresh.active
-    assert migrated.active['policy_hash']==policy_identity()
+    assert migrated.active['policy_hash']==FIVE_VIDEO_POLICY
     assert migrated.get('policy_migration')['first_window']==9
     migrated.close(); fresh.close()
 
