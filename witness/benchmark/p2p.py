@@ -55,7 +55,9 @@ def sign(keypair, method: str, target: str, receiver: str, body=b'', nonce=None)
 class Auth:
     def __init__(self, receiver, snapshot, *, min_stake_alpha=MIN_STAKE_ALPHA, clock=time.time_ns):
         self.receiver, self.snapshot, self.clock = receiver, snapshot, clock
-        self.minimum = int(min_stake_alpha) * 10**9
+        if type(min_stake_alpha) is not int or min_stake_alpha < MIN_STAKE_ALPHA:
+            raise ValueError('validator_stake_floor_required')
+        self.minimum = min_stake_alpha * 10**9
         self.seen, self.lock = {}, threading.Lock()
 
     def verify(self, headers, method, target, body=b''):

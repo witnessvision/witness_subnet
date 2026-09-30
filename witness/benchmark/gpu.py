@@ -121,6 +121,14 @@ class LocalGpu(Gpu):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def run(self, command: list[str], *, timeout: float, stdin: str | None = None) -> subprocess.CompletedProcess:
+        if any(str(arg).endswith('/pod_runtime.py') or str(arg).endswith('/pod_audio.py') for arg in command):
+            if not self.config.get('sandbox_socket'):
+                raise InfrastructureError('gpu_sandbox_required')
+            from .sandbox import request_for, run_isolated
+            request = request_for(command, self.workspace)
+            result = run_isolated(self.config['sandbox_socket'], request, command, timeout=timeout,
+                                  cancelled=self.cancelled, remaining_s=self.remaining_s)
+            return self.checked_result(command, result)
         from .execution import run_process
         result = run_process(command, input=stdin, text=True, timeout=timeout,
                              cancelled=self.cancelled, remaining_s=self.remaining_s,

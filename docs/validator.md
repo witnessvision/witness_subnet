@@ -366,3 +366,31 @@ The zero-burn release preserves the evaluation policy and historical allocations
 through window 15. Window 16 activates the new policy hash. Live weight submission
 uses 100% king immediately after upgrading; without a registered king it retains
 100% burn. Closed decisions, existing results and consumed hotkeys are preserved.
+
+## Isolated local inference
+
+On a local GPU host, set `gpu.sandbox_socket` to the restricted Unix socket of
+`python -m witness.benchmark.sandbox`. The broker must be operated separately
+from the validator, with a pinned image SHA and the host GPU workspace. Do not
+mount the Docker socket into the validator. Only the broker may access it.
+The broker accepts fixed model/audio runtimes and validated job paths, never
+client commands, images, mounts or environment variables. Socket access is
+restricted to the validator UID. An unavailable broker fails closed. Local model/audio inference requires this
+setting; there is no fallback to executing untrusted inputs in the signer.
+
+Every inference job gets its own PID/mount/network namespaces, no network,
+no capabilities, no privilege escalation, a read-only root and model, and
+limits of 512 processes, 64 GiB memory, 12 CPUs and bounded temporary storage.
+It receives only the selected model, pinned environment, public helper caches,
+current job clips/specification and one writable output file. Wallets, signer
+processes, validator state, provider credentials, other submitted models and
+the Docker socket are not mounted. The broker kills the owned container on
+deadline or client disconnect. GPU drivers and the host kernel remain shared;
+container isolation reduces exposure but cannot guarantee absence of a driver
+or kernel vulnerability. Validators authorized to receive weights can retain
+their copies; the protocol cannot prevent redistribution by such validators.
+
+The executor uses a validator-owned startup hook to set PyAV/FFmpeg decoder
+thread count to one. This avoids a per-frame swscale thread pool exceeding the
+process limit; model CPU/GPU inference remains separate. No miner startup code
+or model directory is placed on PYTHONPATH.

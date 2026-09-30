@@ -76,8 +76,8 @@ def main():
             print(json.dumps({'hotkey': hotkey, 'model_id': challenge_id(hotkey, submission.model_id),
                               'manifest_sha256': submission.model_id, 'receipt': receipt}))
         elif args.command == 'serve':
-            if args.min_stake_alpha < 0:
-                parser.error('--min-stake-alpha must be nonnegative')
+            if args.min_stake_alpha < 100000:
+                parser.error('--min-stake-alpha must be at least 100000')
             if args.publish:
                 if not args.external_ip:
                     parser.error('--publish requires --external-ip')

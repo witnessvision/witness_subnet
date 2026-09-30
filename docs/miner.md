@@ -70,8 +70,8 @@ Creating more hotkeys does not move that coldkey to the front.
 
 ## Access protection
 
-The default `--min-stake-alpha 100000` requires **100,000 SN20 alpha** and a
-validator permit. This is a download gate, not a consensus stake threshold.
+The minimum `--min-stake-alpha 100000` requires **100,000 SN20 alpha** and a
+validator permit. This floor cannot be lowered; operators can raise it. This is a download gate, not a consensus stake threshold.
 Every request uses `btauth/1`, binds the receiving miner and URL, expires quickly,
 and rejects replay. Chain state older than 120 seconds fails closed. Downloads
 are bounded and resumable; the client checks the committed certificate before

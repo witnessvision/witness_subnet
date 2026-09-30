@@ -9,7 +9,7 @@ import threading
 import pytest
 
 from witness.benchmark.managed_evaluator import ManagedEvaluator as Evaluator
-from witness.benchmark.gpu import LocalGpu, RunPodGpu, SshGpu
+from witness.benchmark.gpu import Gpu, LocalGpu, RunPodGpu, SshGpu
 from witness.benchmark.ledger import Ledger
 from witness.benchmark.model_cache import remove_models
 from witness.benchmark.protocol import BASELINE, CONTROLS_OK
@@ -31,7 +31,11 @@ def test_decoder_host_resource_failure_is_not_a_model_zero(tmp_path, monkeypatch
         monkeypatch.setattr(module.subprocess, 'run', fake)
         gpu = SshGpu({'host': 'test.invalid', 'ssh_key': str(tmp_path / 'key')}, tmp_path)
     with pytest.raises(InfrastructureError, match='gpu_video_decoder_resource_exhausted'):
-        gpu.run(['timeout', '600', 'python', '/workspace/pod_runtime.py', 'spec.json'], timeout=610)
+        command = ['timeout', '600', 'python', '/workspace/pod_runtime.py', 'spec.json']
+        if backend == 'local':
+            Gpu.checked_result(command, fake(command))
+        else:
+            gpu.run(command, timeout=610)
     assert gpu.run(['python', 'unrelated_script.py'], timeout=1).returncode == 0
 
 
@@ -40,7 +44,9 @@ def test_ordinary_model_failure_keeps_its_existing_classification(tmp_path, monk
     monkeypatch.setattr(execution, 'run_process', lambda *a, **k:
                         subprocess.CompletedProcess(a, 2, '', 'ValueError: incompatible model weights'))
     gpu = LocalGpu({'workspace': str(tmp_path / 'gpu')}, tmp_path)
-    assert gpu.run(['python', '/workspace/pod_runtime.py'], timeout=10).returncode == 2
+    command = ['python', '/workspace/pod_runtime.py']
+    assert Gpu.checked_result(command, subprocess.CompletedProcess(command, 2, '',
+                              'ValueError: incompatible model weights')).returncode == 2
 
 
 def test_held_window_never_completes_a_faulty_bootstrap_pair_and_expires(tmp_path, monkeypatch):
