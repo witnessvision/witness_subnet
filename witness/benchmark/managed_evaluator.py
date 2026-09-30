@@ -256,7 +256,8 @@ class ManagedEvaluator(Evaluator):
                 current = self.prefetch
                 if current and current.entry['model_id'] == entry['model_id']:
                     try:
-                        current.wait(lambda: self._cancelled(window))
+                        with self.performance.phase('prefetch_wait') if self.performance else nullcontext():
+                            current.wait(lambda: self._cancelled(window))
                     finally:
                         if not current.thread.is_alive():
                             self.prefetch = None
