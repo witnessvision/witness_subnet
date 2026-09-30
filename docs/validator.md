@@ -308,7 +308,8 @@ paired evaluation runs. It must belong to the frozen window panel; late
 submissions cannot be prefetched into the active evaluation. Acquisition uses
 an independent 900-second turn, existing cumulative time/package limits,
 mandatory zstandard and final manifest/file hash verification. Before starting,
-free space must cover two maximum-size packages plus 20 GB reserve. Prefetch
+free space must cover five maximum-size packages plus 20 GB reserve: king
+acquisition/copy, foreground acquisition/copy and the prefetched package. Prefetch
 never runs a model, publishes a score, consumes a hotkey, or changes queue order.
 Window closure or shutdown cancels it. Foreground acquisition waits for that
 model's prefetch to unwind, preventing two writers to the same partial files.

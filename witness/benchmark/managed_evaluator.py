@@ -416,9 +416,9 @@ class ManagedEvaluator(Evaluator):
         if (directory/'witness-manifest.json').exists():
             return
         # Manifest architecture is unknown until authenticated acquisition. Reserve
-        # for the largest accepted package, foreground acquisition and 20 GB headroom.
+        # for king acquisition/copy, foreground acquisition/copy, prefetch and 20 GB headroom.
         maximum = max(row['max_bytes'] for row in ARCHITECTURES.values())
-        if shutil.disk_usage(self.root).free < 2*maximum+20*10**9:
+        if shutil.disk_usage(self.root).free < 5*maximum+20*10**9:
             write_private(self.root/'prefetch-status.json', {'status':'skipped_disk_reserve','unix':time.time()})
             return
         def cancelled():
