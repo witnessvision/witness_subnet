@@ -3,7 +3,7 @@
 Witness is a video-understanding subnet for Bittensor SN20. Miners serve immutable
 model weights to evaluator validators. Evaluators compare models on private,
 random audiovisual clips; CPU followers reproduce the decision from finalized
-on-chain scores. **70% of each validator's weight goes to burn and 30% to one king.**
+on-chain scores. **100% of each validator's weight goes to one king, with 0% burn.**
 Before the first king is decided, the allocation is **100% burn**.
 
 [Website](https://witnessvision.io/) · [Miner guide](docs/miner.md) ·

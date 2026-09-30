@@ -5,7 +5,7 @@ computes the same single king as every validator using that protocol release.
 It does not need GPU, ffmpeg, API keys, model downloads or dashboard connectivity.
 An evaluator additionally runs a private GPU worker and publishes its measured
 scores. Both modes allocate 100% to the owner burn UID before the first king,
-then 70% to burn and 30% to the single king. A deregistered king returns the
+then 0% to burn and 100% to the single king. A deregistered king returns the
 allocation to 100% burn. Applied weights are checked as normalized proportions.
 
 ## Activation and follower
@@ -361,3 +361,8 @@ local backend runs under the validator's Unix user. Operators needing resistance
 to a compromised native loader must isolate GPU execution from the signing service
 and its filesystem/process namespace. Safetensors and `trust_remote_code=False`
 prevent executing submitted Python/pickle payloads but do not constitute a sandbox.
+
+The zero-burn release preserves the evaluation policy and historical allocations
+through window 15. Window 16 activates the new policy hash. Live weight submission
+uses 100% king immediately after upgrading; without a registered king it retains
+100% burn. Closed decisions, existing results and consumed hotkeys are preserved.

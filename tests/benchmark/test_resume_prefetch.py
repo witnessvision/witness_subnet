@@ -11,7 +11,7 @@ from witness.benchmark.runner import PodRunner, _run_job
 from witness.benchmark.prefetch import Prefetch
 from witness.benchmark.performance import Performance
 from witness.storage import write_private
-from witness.benchmark.protocol import TEN_VIDEO_POLICY, RESUME_WINDOW, policy_identity
+from witness.benchmark.protocol import TEN_VIDEO_POLICY, RESUME_WINDOW, RESUME_POLICY, policy_identity
 from witness.benchmark.ledger import Ledger
 from witness.benchmark.managed_evaluator import ManagedEvaluator
 from test_scheduling import evaluator_at
@@ -152,7 +152,7 @@ def test_resume_policy_migration_keeps_reported_ten_video_window(tmp_path):
     old.set('cursor',25);old.set('king',{'uid':92});old.close()
     new=Ledger(p,activation_block=1,activation_epoch=0,policy=policy_identity())
     assert new.cursor==25 and new.get('king')=={'uid':92}
-    assert new.policy_for_window(12)==TEN_VIDEO_POLICY and new.policy_for_window(13)==policy_identity()
+    assert new.policy_for_window(12)==TEN_VIDEO_POLICY and new.policy_for_window(13)==RESUME_POLICY
     assert new.get('policy_migration')['first_window']==13
     new.close()
 

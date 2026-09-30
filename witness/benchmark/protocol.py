@@ -28,7 +28,9 @@ RESUME_WINDOW = 13
 TEN_VIDEO_POLICY = "3caf2020574fcc790fbe1d14dca4c9749f6916edc87a3f66217cb9c258a64341"
 FIVE_VIDEO_POLICY = "4623a70ac9c406d8af341390cb25e7d22b29cada7b1b78929d6303cbc27bd239"
 LEGACY_POLICY = "d063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918"
-BURN_FRACTION = .7
+ZERO_BURN_WINDOW = 16
+RESUME_POLICY = "89333ecc57fe24426b6c5f863609a1dfdb1d19107552e7665d48a2a111a5dbb3"
+BURN_FRACTION = 0.
 CONTROLS_OK, REJECTED, BASELINE, EARLY_STOP = 1, 2, 4, 8
 _RESULT = struct.Struct(">IH32s12s32s4HB")
 
@@ -53,22 +55,24 @@ def quantize(value: float) -> int:
     return int(math.floor(value * SCALE + .5))
 
 
-def weight_vector(king: dict | None, snapshot: dict) -> dict:
+def weight_vector(king: dict | None, snapshot: dict, *, burn_fraction: float = BURN_FRACTION) -> dict:
     """One policy for replay, live submission and display; never guess a burn UID."""
     burn = snapshot.get('burn_uid')
     uid = snapshot['uids'].get(king['hotkey']) if king else None
     king = king if uid is not None else None
     allocations = {}
-    if burn is not None:
-        allocations[burn] = BURN_FRACTION if king else 1.
-        if king:
-            allocations[uid] = allocations.get(uid, 0.) + (1. - BURN_FRACTION)
+    if king and (burn is not None or burn_fraction == 0):
+        allocations[uid] = 1. - burn_fraction
+        if burn_fraction:
+            allocations[burn] = allocations.get(burn, 0.) + burn_fraction
+    elif burn is not None:
+        allocations[burn] = 1.
     pairs = sorted(allocations.items())
     return {'king': king, 'uids': [u for u, _ in pairs], 'weights': [w for _, w in pairs],
             'burn_uid': burn, 'king_uid': uid,
-            'burn_fraction': BURN_FRACTION if king else 1.,
-            'king_fraction': 1. - BURN_FRACTION if king else 0.,
-            'source': 'burn_unavailable' if burn is None else 'scores' if king else 'burn_no_king'}
+            'burn_fraction': burn_fraction if king else 1.,
+            'king_fraction': 1. - burn_fraction if king else 0.,
+            'source': 'scores' if allocations and king else 'burn_unavailable' if burn is None else 'burn_no_king'}
 
 
 def weights_match(observed, vector: dict) -> bool:
@@ -241,7 +245,8 @@ def decide(results: list[dict], *, window: int, policy: str, king: dict | None,
     winner = candidates[chosen] if chosen else king
     if winner and winner["hotkey"] not in snapshot["uids"]:
         winner = None
-    return {"window": window, **weight_vector(winner, snapshot),
+    return {"window": window, **weight_vector(winner, snapshot, burn_fraction=.7 if policy in
+                (LEGACY_POLICY, FIVE_VIDEO_POLICY, TEN_VIDEO_POLICY, RESUME_POLICY) else BURN_FRACTION),
             "inconclusive": sorted(inconclusive),
             "early_losses": early_losses,
             "aggregates": {m: {k: float(v) if isinstance(v, Fraction) else v for k, v in a.items()}

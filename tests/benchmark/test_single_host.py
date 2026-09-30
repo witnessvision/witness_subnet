@@ -74,13 +74,13 @@ def test_burn_allocation_and_real_u16_encoding():
     burn = weight_vector(None, snapshot)
     assert burn['uids'] == [240] and burn['weights'] == [1.]
     mixed = weight_vector({'hotkey': 'king'}, snapshot)
-    assert mixed['uids'] == [170, 240] and mixed['weights'] == pytest.approx([.3, .7])
-    assert weights_match([(240, 65535), (170, 28086)], mixed)
+    assert mixed['uids'] == [170] and mixed['weights'] == [1.]
+    assert weights_match([(170, 65535)], mixed)
     assert not weights_match([(240, 65535)], mixed)
     assert not weights_match([(170, 65535), (240, 28086)], mixed)
     assert not weights_match([(170, 28086), (240, 65535), (99, 1)], mixed)
     assert weight_vector({'hotkey': 'departed'}, snapshot) == burn
-    assert weight_vector({'hotkey': 'king'}, {**snapshot, 'burn_uid': None})['uids'] == []
+    assert weight_vector({'hotkey': 'king'}, {**snapshot, 'burn_uid': None})['uids'] == [170]
     collision = weight_vector({'hotkey': 'burn'}, snapshot)
     assert collision['uids'] == [240] and collision['weights'] == [1.]
 

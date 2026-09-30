@@ -6,7 +6,7 @@ import pytest
 
 from witness.benchmark import pool
 from witness.benchmark.ledger import Ledger
-from witness.benchmark.protocol import FIVE_VIDEO_POLICY, LEGACY_POLICY, TEN_VIDEO_POLICY, Result, policy_identity
+from witness.benchmark.protocol import FIVE_VIDEO_POLICY, LEGACY_POLICY, TEN_VIDEO_POLICY, RESUME_POLICY, Result, policy_identity
 from witness.benchmark.reward import eval_for_window
 from witness.benchmark.stopping import futility
 from test_media_recovery import fake_preparation, replay
@@ -39,7 +39,7 @@ def test_ten_video_migration_preserves_reported_history_and_restart(tmp_path):
     assert updated.policy_for_window(8)==LEGACY_POLICY
     assert updated.policy_for_window(11)==FIVE_VIDEO_POLICY
     assert updated.policy_for_window(12)==TEN_VIDEO_POLICY
-    assert updated.policy_for_window(13)==policy_identity()
+    assert updated.policy_for_window(13)==RESUME_POLICY
     updated.close()
     restarted=Ledger(path,activation_block=1,activation_epoch=0,policy=policy_identity())
     assert restarted.active==active
@@ -79,7 +79,7 @@ def test_result_and_report_keep_current_window_policy_during_upgrade(tmp_path):
     worker.ledger=Ledger(tmp_path/'chain.sqlite3',activation_block=1,activation_epoch=0,policy=policy_identity())
     entry={'uid':1,'model_id':'a'*64,'hotkey':'miner'}
     scored={'quality':.5,'reward':.4,'per_video':{},'grades':[]}
-    for window_id,expected in [(11,FIVE_VIDEO_POLICY),(12,TEN_VIDEO_POLICY),(13,policy_identity())]:
+    for window_id,expected in [(11,FIVE_VIDEO_POLICY),(12,TEN_VIDEO_POLICY),(13,RESUME_POLICY)]:
         window={'id':window_id,'start_block':1,'king':None}
         worker._enqueue(entry,window,scored,None,flags=1)
         item=worker.outbox[-1]

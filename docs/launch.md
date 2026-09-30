@@ -16,7 +16,7 @@ Validators following the current SN20 mainnet protocol use:
 Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
 ledger directory. These are shared protocol coordinates, not a certificate that
 all real acceptance checks below have completed. The allocation is 100% burn
-before a king is selected, then 70% burn and 30% to the king.
+before a king is selected, then 0% burn and 100% to the king.
 
 The implementation and synthetic/local integration tests are not an activation
 certificate. Do not announce GPU architecture support or enable production
@@ -63,7 +63,7 @@ writes until the corresponding checks below have measured evidence.
   path without double-signing.
 - **Weights:** verify target-chain burn/allocation limits, permits, current rate
   limits and commit/reveal settings. Observe submitted extrinsic and then the
-  finalized applied 100% burn vector before the first king, then 70% burn / 30% king
+  finalized applied 100% burn vector before the first king, then 0% burn / 100% king
   (compare normalized u16 weights, not individual 65535 values). The writer reads
   the current required weights version from finalized chain state. RPC success
   is not proof that weights have been applied.
