@@ -35,8 +35,9 @@ def test_crash_keeps_reserved_time_and_cannot_reset_quota(tmp_path):
     subprocess.run([sys.executable, '-c', script], check=True, timeout=10)
     record = json.loads((tmp_path / (MODEL + '.json')).read_text())
     assert record == {'charged_s': 900., 'active': True}
-    with DownloadBudget(tmp_path, MODEL) as restarted:
-        assert restarted.used == 900
+    with pytest.raises(DownloadBudgetExceeded):
+        with DownloadBudget(tmp_path, MODEL):
+            pytest.fail('crash reset the acquisition quota')
 
 
 def test_exhausted_quota_survives_restart_and_does_not_touch_existing_partial(tmp_path):
@@ -65,3 +66,31 @@ def test_corrupt_budget_is_infrastructure_failure_not_invalid_model(tmp_path, re
     with pytest.raises(OSError, match='invalid_download_budget_record'):
         with DownloadBudget(tmp_path, MODEL):
             pytest.fail('invalid quota was accepted')
+
+
+def test_only_fresh_readmission_renews_shared_prefetch_and_foreground_quota(tmp_path, monkeypatch):
+    now = [100.]
+    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    budget = DownloadBudget(tmp_path, MODEL)
+    budget.renew(200)
+    with budget:
+        now[0] += 900
+    for block in (199, 200):
+        DownloadBudget(tmp_path, MODEL).renew(block)
+        with pytest.raises(DownloadBudgetExceeded):
+            with DownloadBudget(tmp_path, MODEL):
+                pytest.fail('replay granted a new quota')
+    DownloadBudget(tmp_path, MODEL).renew(201)
+    with DownloadBudget(tmp_path, MODEL) as resumed:
+        assert resumed.used == 0
+        now[0] += 300
+    DownloadBudget(tmp_path, MODEL).renew(201)  # Foreground cannot reset prefetch spending.
+    with DownloadBudget(tmp_path, MODEL) as foreground:
+        assert foreground.used == 300
+        assert foreground.remaining_s() == 600
+
+
+def test_readmission_cannot_reset_a_live_acquisition(tmp_path):
+    with DownloadBudget(tmp_path, MODEL):
+        with pytest.raises(BlockingIOError):
+            DownloadBudget(tmp_path, MODEL).renew(200)

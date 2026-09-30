@@ -155,3 +155,42 @@ def test_resume_policy_migration_keeps_reported_ten_video_window(tmp_path):
     assert new.policy_for_window(12)==TEN_VIDEO_POLICY and new.policy_for_window(13)==policy_identity()
     assert new.get('policy_migration')['first_window']==13
     new.close()
+
+
+def test_cumulative_round_budget_caps_next_attempt_and_prevents_repeated_work(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import EvaluationRoundBudgetExceeded
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window=ledger.active; candidate=window['candidates'][MODELS[2]]
+    record=tmp_path/'performance'/str(window['id'])/(candidate['model_id']+'.json')
+    write_private(record,{'active_s':2600.})
+    worker.deadline=time.monotonic()+1800
+    def check(*args):
+        assert 95 < worker.deadline-time.monotonic() <= 100
+    monkeypatch.setattr(worker,'_attempt_checked',check)
+    ManagedEvaluator._attempt(worker,candidate,window,snapshot(8),set())
+    write_private(record,{'active_s':2700.})
+    monkeypatch.setattr(worker,'_attempt_checked',lambda *a:pytest.fail('exhausted round reran'))
+    with pytest.raises(EvaluationRoundBudgetExceeded):
+        ManagedEvaluator._attempt(worker,candidate,window,snapshot(8),set())
+    assert not worker.outbox
+    ledger.close()
+
+
+def test_exhausted_round_deadline_is_parked_but_window_change_is_not(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import EvaluationRoundBudgetExceeded
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window=ledger.active; candidate=window['candidates'][MODELS[2]]
+    record=tmp_path/'performance'/str(window['id'])/(candidate['model_id']+'.json')
+    worker.context=(window,snapshot(8))
+    def expired(*args):
+        worker.deadline=time.monotonic()-1
+        raise InfrastructureError('evaluation_cancelled_or_budget_expired')
+    monkeypatch.setattr(worker,'_attempt_checked',expired)
+    write_private(record,{'active_s':2600.}); worker.deadline=time.monotonic()+1800
+    with pytest.raises(EvaluationRoundBudgetExceeded):
+        ManagedEvaluator._attempt(worker,candidate,window,snapshot(8),set())
+    worker.context=({**window,'id':window['id']+1},snapshot(8))
+    write_private(record,{'active_s':2600.}); worker.deadline=time.monotonic()+1800
+    with pytest.raises(InfrastructureError):
+        ManagedEvaluator._attempt(worker,candidate,window,snapshot(8),set())
+    ledger.close()

@@ -11,12 +11,12 @@ import time
 
 from witness.storage import write_private
 
-MODEL_DOWNLOAD_BUDGET_S = 90 * 60
+MODEL_DOWNLOAD_BUDGET_S = 15 * 60
 MODEL_DOWNLOAD_TURN_S = 15 * 60
 
 
 class DownloadBudgetExceeded(TimeoutError):
-    """Park acquisition for operator review; this is not a model score."""
+    """Acquisition limit reached; this is not a model score."""
 
 
 class DownloadBudget:
@@ -38,6 +38,7 @@ class DownloadBudget:
             try:
                 record = json.loads(self.path.read_text()) if self.path.exists() else {}
                 self.used = record.get('charged_s', 0.)
+                self.readmission_block = record.get('readmission_block')
                 if (type(self.used) not in (int, float) or not math.isfinite(self.used) or self.used < 0):
                     raise ValueError('invalid_charge')
             except (ValueError, AttributeError) as error:
@@ -47,12 +48,32 @@ class DownloadBudget:
             self.reserved = min(MODEL_DOWNLOAD_TURN_S, MODEL_DOWNLOAD_BUDGET_S - self.used)
             # Charge before starting. A crash keeps the reservation; restarting
             # cannot reset the quota. Normal exits refund unused active time.
-            write_private(self.path, {'charged_s': self.used + self.reserved, 'active': True})
+            write_private(self.path, self._record(self.used + self.reserved, True))
             self.started = time.monotonic()
             return self
         except BaseException:
             self.lock.close()
             raise
+
+    def _record(self, charged, active):
+        record = {'charged_s': charged, 'active': active}
+        if self.readmission_block is not None:
+            record['readmission_block'] = self.readmission_block
+        return record
+
+    def renew(self, block):
+        """A fresh finalized readmission grants one new quota, never a restart."""
+        if type(block) is not int or block <= 0:
+            raise ValueError('invalid_readmission_block')
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self.root / (self.model + '.lock')
+        if any(p.is_symlink() for p in (self.path, lock_path, self.root, *self.root.parents)):
+            raise OSError('unsafe_download_budget_path')
+        with os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'r+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            record = json.loads(self.path.read_text()) if self.path.exists() else {}
+            if block > record.get('readmission_block', 0):
+                write_private(self.path, {'charged_s': 0., 'active': False, 'readmission_block': block})
 
     def remaining_s(self):
         return max(0., self.reserved - (time.monotonic() - self.started))
@@ -63,6 +84,6 @@ class DownloadBudget:
     def __exit__(self, *exc):
         try:
             spent = min(self.reserved, max(0., time.monotonic() - self.started))
-            write_private(self.path, {'charged_s': self.used + spent, 'active': False})
+            write_private(self.path, self._record(self.used + spent, False))
         finally:
             self.lock.close()

@@ -198,7 +198,7 @@ by slowly sending bytes. Cancellation closes the owned request socket. A miner
 cannot bypass the package limit by compressing oversized weights into a small
 response; each decoded range is at most 4 MiB and must match its original length.
 
-Each model has a persistent 90-minute budget for active acquisition, shared by
+Each model has a persistent 15-minute budget for active acquisition, shared by
 all retries and windows on this evaluator. Queue waiting time is excluded;
 manifest transfer, file transfer and local verification during acquisition count.
 An individual turn remains bounded by 15 minutes and the enclosing attempt's
@@ -207,12 +207,21 @@ crash conservatively charges the reserved turn (at most 15 minutes), so repeated
 restarts cannot reset the limit. Accounting starts when a model first reaches
 the budget-aware downloader; historical unrecorded transfer time is not inferred.
 
-Exhausting the budget parks acquisition for operator review with
-`DownloadBudgetExceeded`. The partial cache and hotkey reservation remain intact;
-no zero score or consumed hotkey is created. A parked entry does not block an
-eligible sibling sharing its coldkey. Ordinary restarts do not unpark it. Keep
-`download-budgets/` with the other validator state; deleting these records resets
-resource accounting and must not be used as an automatic retry mechanism.
+Exhausting a challenger's acquisition budget withdraws it from this evaluator's
+queue with `download_time_limit`: no score, result commitment or consumed hotkey.
+A fresh finalized commitment for the same bound submission is required for
+readmission in a subsequent frozen window; that readmission grants one new
+15-minute quota shared by prefetch and foreground, preserving partial bytes.
+Restarts and replaying an old commitment never renew the quota. King acquisition
+failures remain infrastructure failures. Preserve `download-budgets/` with state.
+
+Each challenger also has a cumulative 45-minute active-work allowance per window,
+including preparation, baseline, acquisition, inference and judging. An attempt
+still has its existing 30-minute ceiling. The remaining allowance bounds later
+attempts; exhaustion parks work until the next window, retaining first answers
+and partial grades without inventing a score or blaming the miner for provider
+failures. Parked entries do not block eligible siblings sharing a coldkey.
+The clip ceiling remains 60 seconds and scoring/consensus policy is unchanged.
 
 Known host video-decoder resource exhaustion is an infrastructure failure: defer
 and retry rather than scoring the miner's answer as zero. On hosts exposing many

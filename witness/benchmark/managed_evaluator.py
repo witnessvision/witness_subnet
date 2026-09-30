@@ -14,8 +14,19 @@ from .protocol import Result, RESUME_WINDOW
 from .triggers import Triggers
 
 
+class MinerDownloadExpired(RuntimeError):
+    """Challenger acquisition quota exhausted, no score or hotkey consumption."""
+
+
 class MinerUnavailable(RuntimeError):
     """Miner transport failed; withdraw locally without publishing a result."""
+
+
+ROUND_ACTIVE_BUDGET_S = 45 * 60
+
+
+class EvaluationRoundBudgetExceeded(RuntimeError):
+    """Bound local retry work without blaming a miner for infrastructure delays."""
 
 
 class ScheduledTriggers(Triggers):
@@ -87,9 +98,9 @@ class ScheduledTriggers(Triggers):
                 cap = self.current_block() + 5
                 rows.extend(dict(r) for r in self.db.execute(
                     "SELECT id,retry_block,reason FROM triggers WHERE status='queued' AND retry_block>? "
-                    "AND COALESCE(reason,'') != 'DownloadBudgetExceeded'", (cap,)))
+                    "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded')", (cap,)))
                 self.db.execute("UPDATE triggers SET retry_block=? WHERE status='queued' AND retry_block>? "
-                                "AND COALESCE(reason,'') != 'DownloadBudgetExceeded'", (cap, cap))
+                                "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded')", (cap, cap))
             return rows
 
     def pending(self, count=1, *, before_block=2**63-1, current_block=2**63-1):
@@ -100,6 +111,12 @@ class ScheduledTriggers(Triggers):
                 ORDER BY c.turn,COALESCE(t.readmission_block,t.block),t.hotkey''', (before_block,)).fetchall()
         groups = {}
         for row in rows:
+            if row['reason'] == 'EvaluationRoundBudgetExceeded':
+                if self.interruption(row['window_id']) != 'window_changed':
+                    continue  # Restart cannot grant more time in the same window.
+                with self.lock:
+                    self.db.execute("UPDATE triggers SET retry_block=0,reason='new_window' WHERE id=?", (row['id'],))
+                row = dict(row, retry_block=0, reason='new_window')
             if row['reason'] == 'DownloadBudgetExceeded':
                 continue  # Parked acquisition does not block an eligible sibling.
             candidate = candidates.get(row['model_id'])
@@ -118,13 +135,14 @@ class ScheduledTriggers(Triggers):
         return result
 
     def defer(self, trigger_id, reason, retry_block=0):
-        if reason == 'MinerUnavailable':
+        if reason in ('MinerUnavailable', 'MinerDownloadExpired'):
             with self.lock:
                 row = self.db.execute('SELECT window_id FROM triggers WHERE id=?', (trigger_id,)).fetchone()
                 if row and not self.interruption(row['window_id']):
-                    self.db.execute("UPDATE triggers SET status='withdrawn',reason='miner_unavailable',"
+                    self.db.execute("UPDATE triggers SET status='withdrawn',reason=?,"
                                     "removed_block=?,retry_block=0 WHERE id=? AND status='running'",
-                                    (self.current_block() if self.current_block else 0, trigger_id))
+                                    ('download_time_limit' if reason == 'MinerDownloadExpired' else 'miner_unavailable',
+                                     self.current_block() if self.current_block else 0, trigger_id))
                     return
         if reason == 'CompressionRequired':
             with self.lock:
@@ -132,7 +150,7 @@ class ScheduledTriggers(Triggers):
                                 "retry_block=? WHERE id=? AND status='running'",
                                 ((self.current_block() if self.current_block else 0) + 25, trigger_id))
             return
-        if reason == 'DownloadBudgetExceeded':
+        if reason in ('DownloadBudgetExceeded', 'EvaluationRoundBudgetExceeded'):
             # Durable local parking only; no terminal result or hotkey use.
             return super().defer(trigger_id, reason, 2**63 - 1)
         with self.lock:
@@ -194,6 +212,13 @@ class ManagedEvaluator(Evaluator):
             client.require_compression()
 
         worker.compression_check = check
+        original = worker.download
+        def renewed_download(entry, *args, **kwargs):
+            if entry.get('readmission_block'):
+                from .download_budget import DownloadBudget
+                DownloadBudget(root / 'download-budgets', entry['model_id']).renew(entry['readmission_block'])
+            return original(entry, *args, **kwargs)
+        worker.download = worker.prefetch_download = renewed_download
         return worker
 
     def update(self, snapshot, *, start_worker=True):
@@ -235,6 +260,8 @@ class ManagedEvaluator(Evaluator):
         try:
             return callback()
         except Exception as error:
+            if isinstance(error, DownloadBudgetExceeded) and not self._cancelled(window):
+                raise MinerDownloadExpired('download_time_limit') from error
             remote = not isinstance(error, (CompressionRequired, DownloadBudgetExceeded)) and (
                       isinstance(error, (ConnectionError, TimeoutError, HTTPException, SSLError))
                       or isinstance(error, OSError) and str(error).startswith(('model_server_status_', 'incomplete_model_'))
@@ -500,9 +527,22 @@ class ManagedEvaluator(Evaluator):
             return MeasuredRunner()
         self.download,self.runner,self.judge=download,runner,MeasuredJudge()
         error=None
+        capped = False
         try:
+            path=self.root/'performance'/str(window['id'])/(entry['model_id']+'.json')
+            previous=json.loads(path.read_text()) if path.exists() else {}
+            remaining=ROUND_ACTIVE_BUDGET_S-previous.get('active_s',0.)
+            if remaining <= 0:
+                raise EvaluationRoundBudgetExceeded('round_active_time_limit')
+            bound=time.monotonic()+remaining
+            if self.deadline is None or bound < self.deadline:
+                self.deadline=bound
+                capped=True
             return self._attempt_checked(entry,window,snapshot,partials)
         except Exception as exc:
+            if (capped and self._interruption(window['id']) == 'attempt_budget_elapsed'):
+                error=EvaluationRoundBudgetExceeded('round_active_time_limit')
+                raise error from exc
             error=exc
             raise
         finally:

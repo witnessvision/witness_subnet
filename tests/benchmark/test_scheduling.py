@@ -385,3 +385,49 @@ def test_failed_compression_recovery_is_bounded_and_never_scores(tmp_path, monke
     assert excluded['result'] is None and excluded['usage'] == 'reserved' and not worker.outbox
     worker._recover_compression(ledger.active, snapshot(34))
     assert calls == [5.]
+
+
+def test_miner_download_limit_withdraws_without_hotkey_use_and_preserves_sibling(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import MinerDownloadExpired
+    from witness.benchmark.download_budget import DownloadBudgetExceeded
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window = ledger.active
+    before = ledger.usage(worker.hotkey)
+    original = worker._evaluate
+    def acquisition(*args):
+        raise DownloadBudgetExceeded('model_download_time_budget_exhausted')
+    monkeypatch.setattr(worker, 'download', acquisition)
+    candidate = worker.triggers.pending(10)[0]
+    worker.triggers.start(candidate['id'], window['id'])
+    with pytest.raises(MinerDownloadExpired):
+        worker._miner_io(lambda: acquisition(), window)
+    worker.triggers.defer(candidate['id'], 'MinerDownloadExpired')
+    saved = dict(worker.triggers.db.execute('SELECT * FROM triggers WHERE id=?', (candidate['id'],)).fetchone())
+    assert saved['status'] == 'withdrawn' and saved['reason'] == 'download_time_limit'
+    assert saved['result'] is None and saved['finished_unix'] is None
+    assert ledger.usage(worker.hotkey) == before and worker.outbox == []
+    assert candidate['id'] not in {r['id'] for r in worker.triggers.pending(100)}
+    ledger.close()
+
+
+def test_round_budget_parks_only_same_window_survives_restart_and_releases_sibling(tmp_path):
+    active = {MODELS[i]: entry(i) for i in range(3)}
+    current = [6]
+    interruption = lambda w: 'window_changed' if w != current[0] else None
+    triggers = queue(tmp_path, active, interruption)
+    triggers.current_block = lambda: 100
+    head = next(r for r in triggers.rows() if r['model_id'] == MODELS[1])
+    triggers.start(head['id'], 6)
+    triggers.defer(head['id'], 'EvaluationRoundBudgetExceeded')
+    triggers.recover_interrupted()
+    assert MODELS[1] not in {r['model_id'] for r in triggers.pending(10)}
+    assert MODELS[2] in {r['model_id'] for r in triggers.pending(10)}
+    triggers.close()
+    triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3', candidates=lambda:active,
+                                 interruption=interruption, current_block=lambda:100)
+    triggers.recover_interrupted()
+    assert MODELS[1] not in {r['model_id'] for r in triggers.pending(10)}
+    current[0] = 7
+    assert MODELS[1] in {r['model_id'] for r in triggers.pending(10)}
+    row = next(r for r in triggers.rows() if r['id'] == head['id'])
+    assert row['result'] is None and row['usage'] == 'reserved'

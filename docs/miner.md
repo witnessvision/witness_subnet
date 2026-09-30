@@ -83,11 +83,12 @@ available across evaluation windows so interrupted downloads can resume. Older
 model servers using HTTP/1.0 remain compatible and close each response instead
 of reusing connections between ranges.
 
-Evaluators allow at most 90 minutes of active acquisition per model across
+Evaluators allow at most 15 minutes of active acquisition per model across
 retries, in turns of at most 15 minutes. Waiting in the queue is excluded. Serve
 the full package from a stable, sufficiently fast endpoint: reaching the total
-limit parks that evaluator's download for operator review, without producing a
-model score or consuming the hotkey. A slow drip of HTTP headers does not extend
+limit removes the submission from that evaluator's queue, without producing a
+model score or consuming the hotkey. Submit the same bound commitment again after
+removal to request another acquisition quota in the next eligible window. A slow drip of HTTP headers does not extend
 the per-request 30-second absolute deadline.
 
 Validators require lossless Zstandard compression for every requested file range,
