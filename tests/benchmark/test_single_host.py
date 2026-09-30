@@ -112,3 +112,16 @@ def test_preprocessing_deadline_and_gpu_lock_do_not_kill_foreign_jobs(tmp_path, 
     with pytest.raises(RuntimeError, match='gpu_busy'):
         with gpu.lease():
             pass
+
+
+def test_gpu_children_do_not_inherit_wallet_provider_or_unknown_credentials(tmp_path, monkeypatch):
+    for key in ('BT_PW_fixture', 'OPENAI_API_KEY', 'HF_TOKEN', 'GH_TOKEN', 'CUSTOM_CREDENTIAL'):
+        monkeypatch.setenv(key, 'fixture-only')
+    monkeypatch.setenv('OMP_NUM_THREADS', '4')
+    gpu = LocalGpu({'workspace': str(tmp_path)}, tmp_path)
+    probe = ('import os,json; print(json.dumps({"leaked":any(k in os.environ for k in '
+             '("BT_PW_fixture","OPENAI_API_KEY","HF_TOKEN","GH_TOKEN","CUSTOM_CREDENTIAL")),'
+             '"threads":os.environ.get("OMP_NUM_THREADS"),"workspace":os.environ.get("WITNESS_GPU_WORKSPACE")}))')
+    result = gpu.run([sys.executable, '-c', probe], timeout=10)
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {'leaked': False, 'threads': '4', 'workspace': str(tmp_path)}

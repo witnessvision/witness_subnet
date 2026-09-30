@@ -336,3 +336,28 @@ Ready-for-publication is distinct from finalized chain acknowledgment.
 A separate `<model>.ack.json` records the actual finalized commitment block
 and elapsed wall time until this validator observed that acknowledgment.
 Timing diagnostics never feed scoring or consensus.
+
+
+### Model and service data access
+
+Model transport requires a fresh signed `btauth/1` request from a hotkey with an
+SN20 validator permit and at least 100,000 alpha. Authorization is checked from
+finalized chain state refreshed every 30 seconds; stale state fails closed after
+120 seconds. The signature binds method, complete target, body hash, receiver and
+nonce; replay is rejected. Both manifests and weight ranges require authorization.
+An authorized validator necessarily receives the plaintext model and can retain
+it; access control cannot prevent redistribution by an authorized recipient.
+
+The model server exposes only bounded manifest-listed model ranges over TLS,
+not arbitrary file paths. Keep model serving containers unprivileged, without
+wallets, with read-only mounts and all capabilities dropped. The display API
+publishes only approved status fields and finalized reports/media, never model
+weights, reference labels, configuration or credentials.
+
+Local GPU-command children receive an explicit runtime environment allowlist;
+provider tokens, wallet-password variables and unknown variables are not inherited.
+This is defense in depth, not a filesystem or process isolation boundary: the
+local backend runs under the validator's Unix user. Operators needing resistance
+to a compromised native loader must isolate GPU execution from the signing service
+and its filesystem/process namespace. Safetensors and `trust_remote_code=False`
+prevent executing submitted Python/pickle payloads but do not constitute a sandbox.

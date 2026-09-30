@@ -503,3 +503,31 @@ def test_invalid_compressed_length_is_transport_exclusion_not_model_rejection(tm
     with peer(tmp_path, chunks=1, before=invalid) as (client, state, source, manifest):
         with pytest.raises(CompressionRequired):
             client.require_compression()
+
+
+def test_real_tls_server_rejects_anonymous_nonvalidator_tampering_and_replay(tmp_path):
+    import ssl
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+    from bittensor_wallet import Keypair
+    from witness.benchmark.p2p import sign
+    with peer(tmp_path) as (client, state, source, manifest):
+        target = f'/v1/models/{client.submission.model_id}/manifest'
+        base = f'https://{client.address[0]}:{client.address[1]}'
+        context = ssl._create_unverified_context()  # Fixture certificate; identity tested separately by ModelClient.
+        def request(headers, path=target):
+            try:
+                with urlopen(Request(base+path, headers=headers), context=context, timeout=5) as response:
+                    return response.status, response.read()
+            except HTTPError as error:
+                return error.code, error.read()
+        assert request({})[0] == 403
+        outsider = Keypair.create_from_uri('//Charlie')
+        assert request(sign(outsider, 'GET', target, client.receiver))[0] == 403
+        headers = sign(client.keypair, 'GET', target, client.receiver)
+        assert request(headers, target+'?changed=1')[0] == 403
+        assert request(headers)[0] == 200
+        assert request(headers)[0] == 403
+        file = f'/v1/models/{client.submission.model_id}/files/1?offset=0&length=1'
+        assert request({},file)[0] == 403
+        assert request(sign(outsider,'GET',file,client.receiver),file)[0] == 403

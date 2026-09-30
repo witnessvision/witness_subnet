@@ -30,6 +30,25 @@ import httpx
 from witness.storage import write_private
 from .contract import InfrastructureError
 
+# Model/media children never inherit the validator's provider or wallet credentials.
+GPU_ENVIRONMENT = frozenset({
+    'PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'LD_LIBRARY_PATH',
+    'CUDA_HOME', 'CUDA_PATH', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES',
+    'NVIDIA_DRIVER_CAPABILITIES', 'PYTORCH_CUDA_ALLOC_CONF', 'PYTORCH_ALLOC_CONF',
+    'CUDA_MODULE_LOADING', 'CUBLAS_WORKSPACE_CONFIG', 'TORCH_ALLOW_TF32_CUBLAS_OVERRIDE',
+    'TRITON_CACHE_DIR', 'TORCH_EXTENSIONS_DIR', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+    'OPENBLAS_NUM_THREADS', 'RAYON_NUM_THREADS', 'TOKENIZERS_PARALLELISM',
+    'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
+    'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'HF_DATASETS_OFFLINE',
+    'TRANSFORMERS_CACHE', 'TORCH_HOME', 'XDG_CACHE_HOME',
+})
+
+
+def gpu_environment(workspace):
+    return {**{k: v for k, v in os.environ.items() if k in GPU_ENVIRONMENT},
+            'WITNESS_GPU_WORKSPACE': workspace}
+
+
 DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
 # 48 GB cards at similar prices, in order of preference.
 GPU_TYPES = ["NVIDIA A40", "NVIDIA RTX A6000", "NVIDIA L40", "NVIDIA L40S", "NVIDIA RTX 6000 Ada Generation"]
@@ -105,7 +124,7 @@ class LocalGpu(Gpu):
         from .execution import run_process
         result = run_process(command, input=stdin, text=True, timeout=timeout,
                              cancelled=self.cancelled, remaining_s=self.remaining_s,
-                             env={**os.environ, 'WITNESS_GPU_WORKSPACE': self.workspace})
+                             env=gpu_environment(self.workspace))
         return self.checked_result(command, result)
 
     def put(self, sources: list[Path], destination: str) -> None:
