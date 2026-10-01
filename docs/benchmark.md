@@ -36,8 +36,11 @@ Answers contain timestamped claims in visual, speech, on-screen text and sound
 modalities. Quality follows the versioned precision/recall contract in
 [`reward.py`](../witness/benchmark/reward.py) and
 [`scoring.py`](../witness/benchmark/scoring.py). Across two references, a claim is
-supported if either supports it and contradicted only if both contradict it;
-recall averages the references.
+supported if either supports it and contradicted only if both contradict it
+under the legacy claims-v1 rule. From window 30, events-v2 merges duplicate
+event credit, weights recall by factual salience and discounts unsupported time
+intervals. Independent reference recalls are still averaged. Bounded visual/text
+review repairs precision only; see [Evaluation v3](evaluation-v3.md).
 
 ```
 time_score = clamp(1 - elapsed_seconds / min(60, 10 * clip_duration_seconds), 0, 1)
@@ -54,8 +57,10 @@ instead of quietly turning into a zero.
 ## Early stopping and execution budget
 
 The king always completes all ten videos in one model job. Challenger inference
-runs the first three videos in one job and, only if needed, the remaining seven in a
-second job; it does not reload the model for every video. Grading follows the
+pauses after the first three videos for a single early-stop decision. From
+window 30, the local worker keeps the model loaded and streams answers to four
+grading workers while inference continues; legacy/remote execution uses two
+bounded jobs. It does not reload the model for every video. Grading follows the
 original random draw order, never download-completion order. A deterministic best-possible-completion bound
 may stop a challenger that cannot clear the paired margin even with perfect
 remaining answers.
