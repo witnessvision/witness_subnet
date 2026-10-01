@@ -9,6 +9,32 @@ import threading
 from .protocol import BASELINE, EARLY_STOP, REJECTED, Result, WINDOW_EPOCHS, decide, LEGACY_POLICY, MEDIA_RECOVERY_WINDOW, FIVE_VIDEO_POLICY, TEN_VIDEO_WINDOW, TEN_VIDEO_POLICY, RESUME_WINDOW, RESUME_POLICY, ZERO_BURN_WINDOW, policy_identity
 from .submission import challenge_id, parse_submission
 
+# One network-wide second admission generation. Existing kings and evidence stay.
+HOTKEY_RESET_WINDOW = 32
+PRE_RESET_POLICY = '4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1'
+
+
+def validate_upgrade(upgrade, policy):
+    import re
+    if (not isinstance(upgrade, dict) or
+            not {'first_window', 'previous_policy'} <= set(upgrade) or
+            set(upgrade) - {'first_window', 'previous_policy', 'prior_upgrade', 'admission_reset'} or
+            type(upgrade['first_window']) is not int or upgrade['first_window'] < ZERO_BURN_WINDOW or
+            not isinstance(upgrade['previous_policy'], str) or
+            not re.fullmatch('[0-9a-f]{64}', upgrade['previous_policy']) or
+            upgrade['previous_policy'] == policy):
+        raise ValueError('invalid_policy_upgrade_schedule')
+    if 'admission_reset' in upgrade and (
+            upgrade['admission_reset'] != HOTKEY_RESET_WINDOW or
+            upgrade['first_window'] != HOTKEY_RESET_WINDOW or
+            upgrade['previous_policy'] != PRE_RESET_POLICY):
+        raise ValueError('invalid_admission_reset_upgrade')
+    if 'prior_upgrade' in upgrade:
+        prior = upgrade['prior_upgrade']
+        validate_upgrade(prior, upgrade['previous_policy'])
+        if prior['first_window'] >= upgrade['first_window']:
+            raise ValueError('invalid_policy_upgrade_order')
+
 
 class Ledger:
     def __init__(self, path: Path, *, activation_block: int, activation_epoch: int, policy: str, policy_upgrade: dict | None = None):
@@ -17,13 +43,7 @@ class Ledger:
         self.activation_block, self.activation_epoch, self.policy = activation_block, activation_epoch, policy
         self.policy_upgrade = policy_upgrade
         if policy_upgrade is not None:
-            import re
-            if (set(policy_upgrade) != {'first_window','previous_policy'} or
-                    type(policy_upgrade['first_window']) is not int or policy_upgrade['first_window'] < ZERO_BURN_WINDOW or
-                    not isinstance(policy_upgrade['previous_policy'],str) or
-                    not re.fullmatch('[0-9a-f]{64}',policy_upgrade['previous_policy']) or
-                    policy_upgrade['previous_policy'] == policy):
-                raise ValueError('invalid_policy_upgrade_schedule')
+            validate_upgrade(policy_upgrade, policy)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -39,14 +59,18 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS uses (evaluator TEXT, hotkey TEXT, window INTEGER, result TEXT,
                 PRIMARY KEY(evaluator,hotkey));
             CREATE TABLE IF NOT EXISTS bootstrap_pending (evaluator TEXT, window INTEGER, model TEXT, result TEXT,
-                PRIMARY KEY(evaluator,window,model));''')
+                PRIMARY KEY(evaluator,window,model));
+            CREATE TABLE IF NOT EXISTS admission_archive (reset_window INTEGER, kind TEXT, record TEXT NOT NULL);
+            ''')
         expected = {'block': activation_block, 'epoch': activation_epoch, 'policy': policy}
         self.versioned_media = policy == policy_identity()
         previous = self.get('activation')
         saved_upgrade = self.get('policy_upgrade')
-        if saved_upgrade is not None and saved_upgrade != policy_upgrade:
+        extending = (policy_upgrade is not None and saved_upgrade is not None
+                     and policy_upgrade.get('prior_upgrade') == saved_upgrade)
+        if saved_upgrade is not None and saved_upgrade != policy_upgrade and not extending:
             raise ValueError('policy_upgrade_schedule_changed')
-        if policy_upgrade is not None and saved_upgrade is None:
+        if policy_upgrade is not None and (saved_upgrade is None or extending):
             if previous is not None and previous != {**expected,'policy':policy_upgrade['previous_policy']}:
                 raise ValueError('policy_upgrade_source_mismatch')
             first = policy_upgrade['first_window']
@@ -83,9 +107,33 @@ class Ledger:
             return TEN_VIDEO_POLICY
         if window < ZERO_BURN_WINDOW:
             return RESUME_POLICY
-        if self.policy_upgrade and window < self.policy_upgrade['first_window']:
-            return self.policy_upgrade['previous_policy']
-        return self.policy
+        upgrade, policy = self.policy_upgrade, self.policy
+        while upgrade and window < upgrade['first_window']:
+            policy = upgrade['previous_policy']
+            upgrade = upgrade.get('prior_upgrade')
+        return policy
+
+    def _reset_admissions(self, snapshot, window):
+        if not self.versioned_media or window < HOTKEY_RESET_WINDOW or self.get('hotkey_reset'):
+            return
+        # Called inside ingest's transaction, after old consensus closes and before
+        # the new round opens. All history is archived before active indexes clear.
+        for table in ('submissions', 'uses', 'bootstrap_pending'):
+            for row in self.db.execute(f'SELECT * FROM {table}').fetchall():
+                self.db.execute('INSERT INTO admission_archive VALUES (?,?,?)',
+                                (HOTKEY_RESET_WINDOW, table, json.dumps(dict(row))))
+            self.db.execute(f'DELETE FROM {table}')
+        self.set('bootstrap_retired', [])
+        self.set('bootstrap_after', None)
+        self.set('hotkey_reset', {'window': HOTKEY_RESET_WINDOW, 'block': snapshot['block']})
+
+    def evaluation_compatible(self, window):
+        # This specific release changes admission bookkeeping only. Its scoring,
+        # media, model runtime and timing rules are identical to PRE_RESET_POLICY.
+        # Later scoring upgrades cannot reuse this exception with a new predecessor.
+        return bool(self.policy_upgrade and
+                    self.policy_upgrade.get('admission_reset') == HOTKEY_RESET_WINDOW and
+                    self.policy_for_window(window) == PRE_RESET_POLICY)
 
     def _migrate_media_policy(self, expected, previous_policy):
         """The sole supported transition; reject any already reported affected window.
@@ -257,6 +305,7 @@ class Ledger:
                         if evaluated:
                             self.set('bootstrap_retired', sorted(set(self.get('bootstrap_retired', [])) | pair))
                 if active is None or window != active['id']:
+                    self._reset_admissions(snapshot, window)
                     self._open(snapshot, window)
                 active = self.active
                 for row in sorted(rows, key=lambda r: (r['block'], r['hotkey'], r['value'])):

@@ -125,6 +125,7 @@ class Evaluator:
 
     def update(self, snapshot, *, start_worker=True):
         """Called by the chain thread; never runs inference or paid labeling."""
+        self.triggers.apply_reset(self.ledger.get('hotkey_reset'))
         submissions = self.ledger.submissions()
         self.triggers.observe(submissions, {r['hotkey'] for r in submissions},
                               coldkeys={r['hotkey']: r['coldkey'] for r in submissions},
@@ -430,7 +431,7 @@ class Evaluator:
 
     def run_once(self, window, snapshot):
         upgrade = getattr(self.ledger,'policy_upgrade',None)
-        if upgrade and window['id'] < upgrade['first_window']:
+        if upgrade and window['id'] < upgrade['first_window'] and not self.ledger.evaluation_compatible(window['id']):
             self.progress('waiting_policy_activation',window)
             return
         self.deadline = None

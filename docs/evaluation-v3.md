@@ -54,7 +54,10 @@ provider calls must not be added together to claim duel duration.
    and follower. A fresh follower needs the same schedule before replaying.
 4. Start the prepared release before window N. It follows chain state and sets
    existing weights, but does not evaluate windows before N. The ledger refuses
-   an upgrade that changes already-opened windows or a stored upgrade schedule.
+   an upgrade that changes already-opened windows or rewrites a stored upgrade schedule.
+   Later upgrades retain the earlier schedule via `--prior-policy-upgrade`. The
+   explicitly versioned window-32 admission reset is scoring-compatible with
+   windows 30–31, so `--hotkey-reset-upgrade` continues their evaluations.
 5. Verify the first new baseline and duel: matching policy, terminal commitment,
    finalized consensus/weights, API health and phase timing. Keep queue freezing,
    strict miner retries, compression, authentication and sandbox controls.

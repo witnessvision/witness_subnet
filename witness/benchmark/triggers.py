@@ -30,10 +30,32 @@ class Triggers:
                 self.db.execute(f'ALTER TABLE triggers ADD COLUMN {name} {spec}')
         self.db.execute('CREATE TABLE IF NOT EXISTS coldkey_turns (coldkey TEXT PRIMARY KEY, turn INTEGER NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS king (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS admission_reset (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS admission_archive (trigger_id INTEGER PRIMARY KEY, record TEXT NOT NULL)')
         # Legacy completed uses are retained; old HF pending entries cannot run as v2.
         self.db.execute("UPDATE triggers SET status='legacy', reason='p2p_resubmission_required' "
                         "WHERE value NOT LIKE 'wm2|%' AND status IN ('queued','running','failed')")
         path.chmod(0o600)
+
+    def apply_reset(self, reset):
+        if not reset:
+            return
+        with self.lock:
+            saved = self.db.execute('SELECT value FROM admission_reset WHERE id=1').fetchone()
+            if saved:
+                if json.loads(saved[0]) != reset:
+                    raise ValueError('hotkey_reset_changed')
+                return
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                for row in self.db.execute('SELECT * FROM triggers WHERE block<?', (reset['block'],)).fetchall():
+                    self.db.execute('INSERT INTO admission_archive VALUES (?,?)', (row['id'], json.dumps(dict(row))))
+                    self.db.execute("UPDATE triggers SET status='reset' WHERE id=?", (row['id'],))
+                self.db.execute('INSERT INTO admission_reset VALUES (1,?)', (json.dumps(reset),))
+                self.db.execute('COMMIT')
+            except BaseException:
+                self.db.execute('ROLLBACK')
+                raise
 
     def observe(self, commitments, registered, max_per_hotkey=1, *, coldkeys=None, uids=None):
         if max_per_hotkey != 1:
@@ -43,9 +65,11 @@ class Triggers:
         rows = ([{'hotkey': key, **row} for key, row in commitments.items()]
                 if isinstance(commitments, dict) else commitments)
         with self.lock:
+            reset = self.db.execute('SELECT value FROM admission_reset WHERE id=1').fetchone()
+            minimum_block = json.loads(reset[0])['block'] if reset else 0
             for row in sorted(rows, key=lambda r: (r['block'], r['hotkey'])):
                 hotkey, value, block = row['hotkey'], row['value'], row['block']
-                if hotkey not in registered:
+                if hotkey not in registered or block < minimum_block:
                     continue
                 try:
                     submission = parse_submission(value)
@@ -101,7 +125,7 @@ class Triggers:
             self.db.execute('BEGIN IMMEDIATE')
             try:
                 row = self.db.execute('SELECT coldkey,status FROM triggers WHERE id=?', (trigger_id,)).fetchone()
-                if row is None or row['status'] in TERMINAL:
+                if row is None or row['status'] in (*TERMINAL, 'reset'):
                     raise ValueError('hotkey_already_consumed')
                 turn = self.db.execute('SELECT COALESCE(MAX(turn),0)+1 FROM coldkey_turns').fetchone()[0]
                 self.db.execute('UPDATE coldkey_turns SET turn=? WHERE coldkey=?', (turn, row['coldkey']))
@@ -122,7 +146,7 @@ class Triggers:
             raise ValueError('use_defer_for_infrastructure_failures')
         with self.lock:
             self.db.execute('''UPDATE triggers SET status=?,reason=?,finished_unix=?,result=?
-                               WHERE id=? AND status NOT IN ('done','rejected')''',
+                               WHERE id=? AND status NOT IN ('done','rejected','reset')''',
                             (status, reason, time.time(), json.dumps(result) if result else None, trigger_id))
 
     def reconcile(self, hotkey, result, *, window, rejected=False):

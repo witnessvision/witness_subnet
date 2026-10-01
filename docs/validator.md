@@ -25,8 +25,10 @@ chain endpoint.
 ```bash
 .venv/bin/witness-validator --hotkey PUBLIC_SS58 \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 30 \
-  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
+  --eval-upgrade-window 32 \
+  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
+  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
+  --hotkey-reset-upgrade \
   --root /var/lib/witness-validator
 ```
 
@@ -114,8 +116,10 @@ compute cap is additional; storage, network and provider settlement can add cost
 ```bash
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 30 \
-  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
+  --eval-upgrade-window 32 \
+  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
+  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
+  --hotkey-reset-upgrade \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY
 ```
@@ -136,8 +140,10 @@ pinned base dependencies. Prepare the GPU environments once, before activation:
 .venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 30 \
-  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
+  --eval-upgrade-window 32 \
+  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
+  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
+  --hotkey-reset-upgrade \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
   --publish-results --set-weights

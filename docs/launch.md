@@ -15,10 +15,23 @@ Validators following the current SN20 mainnet protocol use:
 
 Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
 ledger directory when starting a new follower. Current CLI invocations also
-require `--eval-upgrade-window 30 --previous-policy
-14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74`.
-The events-v2 policy is `4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1`;
-[Evaluation v3](evaluation-v3.md) explains the preserved history and rollout.
+require the window-32 admission reset schedule shown in [Validator setup](validator.md).
+The events-v2 policy for windows 30–31 remains
+`4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1`.
+Pass it as `--previous-policy`, retain the original window-30 schedule in
+`--prior-policy-upgrade`, and use `--eval-upgrade-window 32 --hotkey-reset-upgrade`.
+Install this release before window 32 opens; already-opened windows cannot be migrated.
+
+At window 32, every hotkey gets one new admission opportunity. The existing king,
+closed decisions, commitments, and archived admissions/results remain intact.
+All old queue entries expire, including pending or withdrawn submissions. Miners
+must publish a fresh commitment at or after the first finalized block of window 32;
+old commitments do not automatically re-enter. As usual, a submission can only be
+evaluated in a later window whose queue was locked after that commitment.
+This is a **one-time reset**, not unlimited hotkey reuse. All validators/followers
+must use the same release and activation schedule. Scoring is unchanged, so
+this reset-only upgrade continues evaluations under the original policy until activation.
+
 These are shared protocol coordinates, not a certificate that
 all real acceptance checks below have completed. The allocation is 100% burn
 before a king is selected, then 0% burn and 100% to the king.

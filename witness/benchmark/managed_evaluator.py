@@ -72,7 +72,7 @@ class ScheduledTriggers(Triggers):
             return super().observe(rows, set(registered) - blocked, *args, **kwargs)
 
     def rows(self):
-        return [row for row in super().rows() if row['status'] not in ('excluded', 'withdrawn')]
+        return [row for row in super().rows() if row['status'] not in ('excluded', 'withdrawn', 'reset')]
 
     def reconcile(self, hotkey, result, *, window, rejected=False):
         # Only the finalized ledger can turn an excluded entry into a used one.
@@ -254,6 +254,7 @@ class ManagedEvaluator(Evaluator):
         return worker
 
     def update(self, snapshot, *, start_worker=True):
+        self.triggers.apply_reset(self.ledger.get('hotkey_reset'))
         # The consensus ledger retains first bindings, so reread fresh finalized
         # commitments separately for explicit readmission of the SAME model.
         with self.triggers.lock:

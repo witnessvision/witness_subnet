@@ -230,6 +230,10 @@ def main():
     parser.add_argument('--activation-epoch', type=int, required=True)
     parser.add_argument('--eval-upgrade-window', type=int, required=True)
     parser.add_argument('--previous-policy', required=True)
+    parser.add_argument('--prior-policy-upgrade', type=json.loads,
+                        help='Previous upgrade schedule as JSON; preserves historical replay')
+    parser.add_argument('--hotkey-reset-upgrade', action='store_true',
+                        help='Activate the one-time admission reset at window 32')
     parser.add_argument('--root', type=Path, default=Path.home() / '.witness' / 'validator-v2')
     parser.add_argument('--wallet-name', default='default')
     parser.add_argument('--wallet-hotkey', default='default')
@@ -271,7 +275,9 @@ def main():
     chain, writer_chain = Chain(args.network, args.netuid), None
     ledger = Ledger(root / 'chain.sqlite3', activation_block=args.activation_block,
                     activation_epoch=args.activation_epoch, policy=policy_identity(),
-                    policy_upgrade=({'first_window':args.eval_upgrade_window,'previous_policy':args.previous_policy}
+                    policy_upgrade=({'first_window':args.eval_upgrade_window,'previous_policy':args.previous_policy,
+                                     **({'admission_reset':32} if args.hotkey_reset_upgrade else {}),
+                                     **({'prior_upgrade':args.prior_policy_upgrade} if args.prior_policy_upgrade else {})}
                                     if args.eval_upgrade_window is not None else None))
     store = ChainCommitments(chain.subtensor, args.netuid)
     publish_store = None
