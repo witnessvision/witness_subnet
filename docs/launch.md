@@ -119,6 +119,22 @@ consensus service.
 
 ### Native FP8 runtime
 
+The SALMONN FP8 loader additionally requires `accelerate==1.15.0`. Provision it
+in the existing SALMONN environment before enabling quantized submissions:
+
+```bash
+envs/salmonn/bin/python -m pip install --no-deps accelerate==1.15.0
+envs/salmonn/bin/python -c 'import accelerate; assert accelerate.__version__ == "1.15.0"'
+```
+
+This supplies the optional model-loading dependency missing from the historical
+SALMONN environment; it does not upgrade Torch or the other pinned packages.
+The setup uses system-site packages, so an installation that works on one host
+can still lack this dependency on another. Qualify a **complete quantized-model
+load in the actual inference sandbox**, not only standalone FP8 kernel arithmetic.
+Keep active-window protocol lockfiles unchanged when repairing a missing
+provisioning dependency. Include this prerequisite when recreating the runtime.
+
 From window 31, SALMONN W8A8 compressed-tensors linears with symmetric per-tensor
 FP8 E4M3 weights and dynamic per-tensor FP8 inputs use validator-owned GPU kernels.
 Large prefill batches use CUDA scaled matrix multiplication; single-token decode
