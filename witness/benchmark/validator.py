@@ -73,8 +73,8 @@ class Validator:
             # non-observable pending commit instead of potentially duplicating it.
             if (weights_match(self.chain.applied_weights(self.hotkey, snapshot), state)
                     and snapshot.get('last_update', {}).get(self.hotkey, snapshot['block']) >= state['block']):
-                write_private(self.root / 'weight-send.json', {**state, 'status': 'applied', 'block': snapshot['block']})
-                write_private(self.root / 'last-weights.json', {**state, 'block': snapshot['block']})
+                write_private(self.root / 'weight-send.json', {**state, 'status': 'applied', 'applied_block': snapshot['block']})
+                write_private(self.root / 'last-weights.json', {**state, 'applied_block': snapshot['block']})
             return False
         if state.get('status') == 'rejected' and snapshot['block'] - state['block'] < 5:
             return False

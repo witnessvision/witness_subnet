@@ -664,3 +664,19 @@ def test_burn_override_sends_only_burn_and_retains_shadow_king(tmp_path):
     public = json.loads((tmp_path/'queue.json').read_text())
     assert public['weights']['without_burn_override']['uids'] == [1]
     validator.close(); ledger.close()
+
+
+def test_reveal_observation_does_not_restart_chain_weight_cooldown(tmp_path):
+    from witness.benchmark.validator import Validator
+    ledger=fill_ledger(tmp_path)
+    class Chain:
+        def applied_weights(self,*args):return [(1,65535)]
+    v=Validator(hotkey=VALS[0],root=tmp_path,chain=Chain(),store=FileCommitments(tmp_path/'transport'),ledger=ledger)
+    write_private(tmp_path/'weight-send.json',{'status':'submitted','block':5,'uids':[1],'weights':[1.]})
+    target={'uids':[6],'weights':[1.]}
+    assert not v._due(target,snapshot(100,weights_rate_limit=10,last_update={VALS[0]:6}))
+    saved=v._load('last-weights.json')
+    assert saved['block']==5 and saved['applied_block']==100
+    assert v._due(target,snapshot(101,weights_rate_limit=10,last_update={VALS[0]:6}))
+    assert not v._due(target,snapshot(101,weights_rate_limit=10,last_update={VALS[0]:100}))
+    v.close();ledger.close()
