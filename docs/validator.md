@@ -27,7 +27,7 @@ chain endpoint.
   --activation-block BLOCK --activation-epoch EPOCH \
   --eval-upgrade-window 30 \
   --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
-  --root /var/lib/witness-validator --status-port 8099
+  --root /var/lib/witness-validator
 ```
 
 This opens no wallet and performs no chain writes. Inspect
@@ -117,8 +117,7 @@ compute cap is additional; storage, network and provider settlement can add cost
   --eval-upgrade-window 30 \
   --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
-  --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
-  --status-port 8099
+  --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY
 ```
 
 Starting evaluator mode can spend GPU/API budget even without chain write flags.
@@ -141,15 +140,15 @@ pinned base dependencies. Prepare the GPU environments once, before activation:
   --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
-  --publish-results --set-weights --status-host 0.0.0.0 --status-port 8099
+  --publish-results --set-weights
 ```
 
-Use the local GPU configuration above. This process exports validator status and runs
-chain tracking and evaluation independently. Model and media subprocesses remain
+Use the local GPU configuration above. This process runs chain tracking and
+evaluation independently. Model and media subprocesses remain
 isolated and cancellable. It never rents or stops a GPU and needs no RunPod key,
 SSH worker or separate GPU service. Process supervision for reboot recovery is
 optional. Put persistent state and encrypted wallet files on durable storage;
-never rely on a cloud container's ephemeral disk. Serve the status port over HTTPS.
+never rely on a cloud container's ephemeral disk.
 
 Other GPU jobs must acquire the same `/var/lib/witness-gpu/gpu.lock` with `flock`.
 The evaluator acquires that lock for the whole paired attempt and checks for
@@ -304,20 +303,18 @@ under provider/network failure.
 
 ## Dashboard and operator state
 
-`--status-port 8099` defaults to loopback. It exports this validator's status
-at `/queue.json` and finalized evidence at
-`/api/evaluations/{validator}/{window}/{model}` and
-`/api/media/{validator}/{window}/{digest}.mp4`. Place it behind the operator's
-chosen HTTPS proxy when sharing it. The status server serves no HTML or assets.
-Reports and clips remain unavailable while their window is open. Report hashes
-and media hashes are checked before serving evidence; references, API logs,
-model weights and sampling secrets remain private.
+The validator opens no status or evidence port. A display application receives
+data only when the validator pushes it with
+`--telemetry-url https://DISPLAY/api/telemetry`: public status plus the scores of
+its latest closed-window reports (totals, video averages and per-clip quality,
+reward, latency and time score). Model responses, clip media, references, API logs,
+model weights and sampling secrets never leave the validator. Reports of an open
+window are never sent.
 
-Optional external display applications can consume these endpoints. Validators
-may send signed public status with `--telemetry-url https://DISPLAY/api/telemetry`.
-Signatures bind the hotkey to public status; receiving applications must reject
-stale/replayed updates and verify permitted-validator membership. Telemetry never
-supplies consensus decisions. No wallet keys or private labels are sent.
+The validator hotkey signs every update; receiving applications must reject
+stale/replayed updates, verify permitted-validator membership and accept only the
+public field set. Telemetry never supplies consensus decisions. No wallet keys or
+private labels are sent.
 
 Useful private files: `last-error.json`, `worker-error.json`,
 `commitment-error.json`, `weight-send.json`, `last-weights.json`,

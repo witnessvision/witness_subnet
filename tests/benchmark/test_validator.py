@@ -426,6 +426,32 @@ def test_follower_replays_history_without_writes_and_restart_reconciles_unknown(
     ledger.close()
 
 
+def test_burn_all_sends_every_weight_to_burn_uid_and_keeps_king_displayed(tmp_path, monkeypatch):
+    from witness.benchmark.validator import Validator
+    class Chain:
+        def head(self): return 8
+        def frame(self, height): return snapshot(height)
+        def snapshot(self, height=None): return snapshot(height or 8)
+        def applied_weights(self, *args): return []
+    store = FileCommitments(tmp_path/'transport', writable=True)
+    for i in (0, 1):
+        store.publish(MINERS[i], submission(i).commitment, 1)
+    for i, score in ((0, 50000), (1, 40000)):
+        store.publish(VALS[0], result(0, i, score, score, kr=0, kq=0, block=5)['value'], 5+i)
+    ledger = Ledger(tmp_path/'chain.sqlite3', activation_block=1, activation_epoch=0, policy=POLICY)
+    monkeypatch.setenv('BURN_ALL', '1')
+    sent = []
+    validator = Validator(hotkey=VALS[0], root=tmp_path, chain=Chain(), store=store, ledger=ledger,
+                          set_weights=lambda *args: sent.append(args) or {'success': True}, burn_all=True)
+    intent = validator.step()
+    validator.future.result(timeout=3)
+    assert intent['uids'] == [6] and intent['weights'] == [1.] and intent['source'] == 'burn_override'
+    assert intent['king']['hotkey'] == MINERS[0] and sent == [([6], [1.])]
+    assert validator._load('weight-send.json')['hotkey'] is None
+    validator.close()
+    ledger.close()
+
+
 def test_explicit_weight_write_failure_is_retried_after_backoff(tmp_path):
     from witness.benchmark.validator import Validator
     class Chain:
@@ -508,42 +534,33 @@ def test_untrusted_manifest_types_fail_as_validation_errors():
             validate_manifest(value)
 
 
-def test_status_seals_open_windows_and_checks_closed_media(tmp_path):
-    from witness.benchmark.status import Evidence, serve_status
-    import httpx
+def test_status_seals_open_windows_and_exports_scores_only(tmp_path):
+    from witness.benchmark.status import Evidence
+    from witness.benchmark.telemetry import public_status
     ledger = Ledger(tmp_path/'chain.sqlite3', activation_block=1, activation_epoch=0, policy=POLICY)
     ledger.ingest(snapshot(1), [])
-    media = tmp_path/'clips/clip.mp4'
-    media.parent.mkdir()
-    media.write_bytes(b'FAKE_MP4_PUBLIC_AFTER_CLOSE')
-    digest = hashlib.sha256(media.read_bytes()).hexdigest()
-    body = {'available': True, 'videos': [{'id': 'source', 'clips': [{'id': digest}]}]}
+    scores = {'quality': 0.5, 'reward': 0.45, 'latency_s': 3.0, 'time_score': 0.95}
+    clip = {'id': 'c' * 64, 'start': 1.0, 'duration': 8.0, 'video_url': '/api/media/x.mp4',
+            'response': {'claims': ['MODEL_OUTPUT']}, **scores, 'king': {'response': 'KING_OUTPUT', **scores}}
+    body = {'available': True, 'validator': VALS[0], 'window_id': 0, 'model_id': MODELS[0], 'private_note': 'SECRET',
+            'videos': [{'id': 'source', 'quality': 0.5, 'reward': 0.45, 'clips': [clip]}]}
     report_hash = content_hash(body)
     write_private(tmp_path/'reports'/f'{report_hash}.json', body)
-    write_private(tmp_path/'windows/0/batch.json', [{'clip_sha256': digest, 'media_path': str(media)}])
     state = {'schema_version': 'witness-evaluator-status-2', 'validator': VALS[0], 'mode': 'evaluator',
              'block': 1, 'triggers': [], 'evaluations': [{'window_id': 0, 'model_id': MODELS[0],
                                                         'available': True, 'report_hash': report_hash}]}
     write_private(tmp_path/'queue.json', state)
     view = Evidence(tmp_path)
     assert view.evaluation(VALS[0], 0, MODELS[0])['available'] is False
-    with pytest.raises(FileNotFoundError): view.media(VALS[0], 0, digest)
+    assert view.closed_reports() == []
     for block in range(2, 5): ledger.ingest(snapshot(block), [])
-    assert view.evaluation(VALS[0], 0, MODELS[0])['available'] is True
-    server = serve_status(tmp_path, '127.0.0.1', 0)
-    try:
-        base = f'http://127.0.0.1:{server.server_port}'
-        assert httpx.get(base + '/').status_code == 404
-        assert httpx.get(base + '/static/dashboard.html').status_code == 404
-        assert httpx.get(base + '/queue.json').json() == state
-        url = f'{base}/api/media/{VALS[0]}/0/{digest}.mp4'
-        response = httpx.get(url, headers={'Range': 'bytes=0-3'})
-        assert response.status_code == 206 and response.content == b'FAKE'
-        media.write_bytes(b'ALTERED')
-        assert httpx.get(url).status_code == 400
-    finally:
-        server.shutdown(); server.server_close(); ledger.close()
-
+    report = view.evaluation(VALS[0], 0, MODELS[0])
+    assert report['videos'][0]['clips'][0] == {'id': 'c' * 64, 'start': 1.0, 'duration': 8.0, **scores, 'king': scores}
+    assert report['report_hash'] == report_hash
+    telemetry = json.dumps(public_status(state, view.closed_reports()))
+    assert 'OUTPUT' not in telemetry and 'SECRET' not in telemetry and 'video_url' not in telemetry
+    assert report_hash in telemetry
+    ledger.close()
 
 
 def test_retrying_head_cannot_be_overtaken_by_same_coldkey(tmp_path):

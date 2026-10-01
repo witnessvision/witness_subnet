@@ -185,7 +185,8 @@ class Validator:
         write_private(self.root / 'telemetry-peers.json', {'self': self.hotkey, 'updated_unix': time.time(),
                                                          'validators': snapshot['validators']})
         if self.telemetry:
-            self.telemetry.submit(self._load('queue.json'))
+            from .status import Evidence
+            self.telemetry.submit(self._load('queue.json'), Evidence(self.root).closed_reports())
 
     def close(self):
         if self.evaluator:
@@ -240,8 +241,6 @@ def main():
     parser.add_argument('--env', type=Path)
     parser.add_argument('--interval', type=float, default=12.)
     parser.add_argument('--once', action='store_true')
-    parser.add_argument('--status-port', type=int)
-    parser.add_argument('--status-host', default='127.0.0.1')
     parser.add_argument('--web-port', type=int, help='Serve the public web/API in this process (requires a separately installed web application)')
     parser.add_argument('--web-host', default='127.0.0.1')
     parser.add_argument('--telemetry-url', help='Optional HTTPS /api/telemetry for signed display status')
@@ -295,10 +294,6 @@ def main():
     validator = Validator(hotkey=hotkey, root=root, chain=chain, store=store, ledger=ledger,
                           evaluator=evaluator, set_weights=set_weights, publication_store=publish_store,
                           telemetry=telemetry, burn_all=burn_value == '1')
-    server = None
-    if args.status_port:
-        from .status import serve_status
-        server = serve_status(root, args.status_host, args.status_port)
     web, web_thread = None, None
     if args.web_port:
         import uvicorn
@@ -325,8 +320,6 @@ def main():
             stopped.wait(args.interval)
     finally:
         validator.close()
-        if server:
-            server.shutdown()
         if web:
             web.should_exit = True
             web_thread.join(timeout=15)

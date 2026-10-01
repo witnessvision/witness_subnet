@@ -400,7 +400,6 @@ class Evaluator:
                             'latency_s': value.get('latency_s'), 'time_score': value.get('speed'),
                             'reward': value['reward']}
                 clips.append({'id': row['id'], 'start': row['start'], 'duration': row['duration'],
-                              'video_url': f'/api/media/{self.hotkey}/{window["id"]}/{row["id"]}.mp4',
                               **metrics(row), 'king': metrics(other) if other else None})
             other = (baseline or {}).get('per_video', {}).get(video, {})
             videos.append({'id': video, 'quality': summary['quality'], 'reward': summary['reward'],
