@@ -177,7 +177,7 @@ def test_cumulative_round_budget_caps_next_attempt_and_prevents_repeated_work(tm
 
 
 def test_exhausted_round_deadline_is_parked_but_window_change_is_not(tmp_path, monkeypatch):
-    from witness.benchmark.managed_evaluator import EvaluationRoundBudgetExceeded
+    from witness.benchmark.managed_evaluator import InfrastructureRoundBudgetExceeded
     worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
     window=ledger.active; candidate=window['candidates'][MODELS[2]]
     record=tmp_path/'performance'/str(window['id'])/(candidate['model_id']+'.json')
@@ -187,7 +187,7 @@ def test_exhausted_round_deadline_is_parked_but_window_change_is_not(tmp_path, m
         raise InfrastructureError('evaluation_cancelled_or_budget_expired')
     monkeypatch.setattr(worker,'_attempt_checked',expired)
     write_private(record,{'active_s':2600.}); worker.deadline=time.monotonic()+1800
-    with pytest.raises(EvaluationRoundBudgetExceeded):
+    with pytest.raises(InfrastructureRoundBudgetExceeded):
         ManagedEvaluator._attempt(worker,candidate,window,snapshot(8),set())
     worker.context=({**window,'id':window['id']+1},snapshot(8))
     write_private(record,{'active_s':2600.}); worker.deadline=time.monotonic()+1800

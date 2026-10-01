@@ -155,6 +155,27 @@ class LocalGpu(Gpu):
     def read(self, path: str) -> str:
         return Path(path).read_text() if Path(path).exists() else ""
 
+    def read_available(self, path: str, offset: int):
+        """Only complete flushed rows, without repeatedly reading a whole job."""
+        if not Path(path).exists():
+            return '', offset
+        rows = []
+        with Path(path).open('rb') as stream:
+            stream.seek(offset)
+            for _ in range(64):
+                start = stream.tell()
+                line = stream.readline(512*1024)
+                if not line:
+                    break
+                if not line.endswith(b'\n'):
+                    if len(line) == 512*1024:
+                        raise InfrastructureError('oversized_execution_row')
+                    stream.seek(start)
+                    break
+                rows.append(line.decode('utf-8'))
+            return ''.join(rows), stream.tell()
+
+
     def remove_models(self, models: list[str]) -> list[str]:
         from .model_cache import remove_models
         return remove_models(Path(self.workspace) / 'models', models)

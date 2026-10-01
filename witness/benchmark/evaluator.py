@@ -34,6 +34,7 @@ class Evaluator:
         self.guard = None
         self.deadline = None
         self.attempt_epoch = None
+        self.reviewer = None
         path = self.root / 'outbox.json'
         self.outbox = json.loads(path.read_text()) if path.exists() else []
 
@@ -65,7 +66,7 @@ class Evaluator:
                       budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
         base = dict(runtime_hash=content_hash(runtime_identity(config['gpu'])), preprocessing_hash=PREPROCESSOR_ID,
                     reference_kind='machine', min_annotators=1, confirmation_size=2, screen_size=1,
-                    quality_floor=0., judge_id='pending')
+                    quality_floor=0., judge_id='pending', scoring_version='events-v2')
         judge = CodexJudge(Policy(**base), model=api.model, effort=api.effort, api=api)
         policy = Policy(**{**base, 'judge_id': judge.identity})
 
@@ -105,6 +106,13 @@ class Evaluator:
                    batch_factory=lambda window: window_batch(root / 'pool-v2', window['id'], hotkey,
                        gpu=gpu, api=labeler, policy=policy, source_urls=source_urls), download=download,
                    runner=lambda submissions, job: PodRunner(gpu, submissions, policy, job))
+        from .novel_review import NovelReviewer
+        review_api = ApiText('gpt-5.6-terra', root / 'review-cache', provider=provider, effort='low',
+                            max_tokens=4096, budget_path=str(root / 'budget.sqlite3'),
+                            daily_limit_usd=config.get('api_daily_limit_usd'))
+        evaluator.reviewer = NovelReviewer(review_api)
+        review_api.request_timeout_s = lambda: (
+            min(30., evaluator.deadline-time.monotonic()) if evaluator.deadline else 30.)
         evaluator.prefetch_download = download
         api.request_timeout_s = labeler.request_timeout_s = lambda: (
             min(30., evaluator.deadline - time.monotonic()) if evaluator.deadline else 30.)
@@ -253,6 +261,10 @@ class Evaluator:
         if (len(grades) % spec.clips_per_video or len(grades) > len(rows)
                 or [r['id'] for r in grades] != [c.task.clip_sha256 for c, _ in selected[:len(grades)]]):
             raise InfrastructureError('cached_progress_binding_failed')
+        if (getattr(self.policy, 'scoring_version', None) == 'events-v2' and hasattr(run, 'stream')
+                and hasattr(self.gpu, 'read_available')):
+            return self._stream_evaluate(run, model_id, window, rows, selected, grades,
+                                         baseline, resume, root, path, progress_path, hardware_file)
         stopped = None
         first = len(grades)
         boundaries = [3 * spec.clips_per_video, len(rows)] if baseline and not resume and first < 6 else [len(rows)]
@@ -276,7 +288,7 @@ class Evaluator:
                 if execution is None:
                     raise InfrastructureError('missing_execution')
                 value = grade(case, references, execution, model_id, policy=self.policy, judge=self.judge,
-                              root=root / 'judge')
+                              root=root / 'judge', reviewer=self.reviewer)
                 grades.append({**value, 'id': case.task.clip_sha256, 'duration': case.task.duration,
                                'start': row['start'], 'file': row['file']})
                 self.progress('judging', window, model_id, len(grades))
@@ -292,6 +304,87 @@ class Evaluator:
         if stopped:
             result.update(early_stop=stopped, quality=stopped['quality_upper'], reward=stopped['reward_upper'])
         write_private(path, result)
+        return result
+
+    def _stream_evaluate(self, run, model_id, window, rows, selected, grades, baseline,
+                         resume, root, path, progress_path, hardware_file):
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+        spec = eval_for_window(window['id'])
+        first = len(grades)
+        pending = {}
+        stopped = None
+        pool = ThreadPoolExecutor(4, thread_name_prefix='witness-judge')
+        def check():
+            if self._cancelled(window):
+                raise InfrastructureError('evaluation_cancelled_or_budget_expired')
+        def drain(block=False):
+            while len(grades) < len(selected):
+                index = len(grades)
+                task = selected[index][0].task
+                future = pending.get(task.id)
+                if future is None or (not block and not future.done()):
+                    return
+                while True:
+                    check()
+                    try:
+                        value = future.result(timeout=.2)
+                        break
+                    except FutureTimeout:
+                        if future.done():
+                            raise  # A provider TimeoutError is not a polling timeout.
+                row = rows[index]
+                grades.append({**value,'id':task.clip_sha256,'duration':task.duration,
+                               'start':row['start'],'file':row['file']})
+                self.progress('judging',window,model_id,len(grades))
+                if len(grades) % spec.clips_per_video == 0:
+                    write_private(progress_path,{'grades':grades,'continue_to_full':resume})
+        by_id = {case.task.id:(case,refs) for case,refs in selected[first:]}
+        def completed(execution):
+            check()
+            case, refs = by_id[execution.task_id]
+            hardware = run.hardware_id
+            if hardware_file.exists() and json.loads(hardware_file.read_text())['id'] != hardware:
+                raise InfrastructureError('hardware_changed_wait_for_next_window')
+            if not hardware_file.exists():
+                if not hardware:
+                    raise InfrastructureError('missing_hardware_identity')
+                write_private(hardware_file,{'id':hardware})
+            # The runner validates receipts and persists the first answer before
+            # invoking this callback. Grades still carry full execution bindings.
+            if execution.task_id in pending:
+                raise InfrastructureError('duplicate_stream_execution')
+            pending[execution.task_id] = pool.submit(grade,case,refs,execution,model_id,
+                policy=self.policy,judge=self.judge,root=root/'judge',reviewer=self.reviewer)
+            drain()
+        def continuation():
+            nonlocal stopped
+            drain(block=True)
+            if len(grades) != 3*spec.clips_per_video:
+                raise InfrastructureError('early_stop_prefix_incomplete')
+            stopped = futility(list(video_scores(grades).values()),baseline['reward'],planned_videos=spec.videos)
+            return stopped is None
+        gate = 3*spec.clips_per_video-first if baseline and not resume and first < 6 else None
+        try:
+            batch = selected[first:]
+            if batch:
+                self.progress('evaluating',window,model_id,first)
+                run.stream([model_id],[c.task for c,_ in batch],[Path(c.media_path) for c,_ in batch],
+                           on_execution=completed,pause_after=gate,continue_batch=continuation if gate else None)
+                hardware = run.hardware_id
+                if hardware_file.exists() and json.loads(hardware_file.read_text())['id'] != hardware:
+                    raise InfrastructureError('hardware_changed_wait_for_next_window')
+                if not hardware_file.exists():
+                    write_private(hardware_file,{'id':hardware})
+                drain(block=True)
+            if not stopped and len(grades) != len(selected):
+                raise InfrastructureError('missing_stream_execution')
+        finally:
+            pool.shutdown(wait=True,cancel_futures=True)
+        videos = video_scores(grades)
+        result = {'model_id':model_id,'grades':grades,'per_video':videos,**eval_score(videos)}
+        if stopped:
+            result.update(early_stop=stopped,quality=stopped['quality_upper'],reward=stopped['reward_upper'])
+        write_private(path,result)
         return result
 
     def _report(self, entry, window, scored, baseline):
@@ -337,6 +430,10 @@ class Evaluator:
                 self._save_outbox()
 
     def run_once(self, window, snapshot):
+        upgrade = getattr(self.ledger,'policy_upgrade',None)
+        if upgrade and window['id'] < upgrade['first_window']:
+            self.progress('waiting_policy_activation',window)
+            return
         self.deadline = None
         self.attempt_epoch = snapshot['epoch_index']
         with self.lock:

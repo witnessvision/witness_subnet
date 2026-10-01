@@ -41,7 +41,7 @@ recall averages the references.
 
 ```
 time_score = clamp(1 - elapsed_seconds / min(60, 10 * clip_duration_seconds), 0, 1)
-clip_reward = quality * (0.8 + 0.2 * time_score)
+clip_reward = quality * (0.9 + 0.1 * time_score)  # events-v2; legacy uses 0.8/0.2
 video_quality, video_reward = arithmetic means of that video's clips
 eval_quality, eval_reward = arithmetic means of the video means
 ```
@@ -153,3 +153,6 @@ The selected king receives the entire normalized vector `[1.0]`. Weights are
 never spread across the kings named by different validators. Decision, extrinsic
 submission and observed applied weights are distinct states, especially with
 chain commit/reveal enabled.
+
+The versioned events-v2 rollout, fact-weighted scoring, bounded media review and
+activation procedure are described in [Evaluation v3](evaluation-v3.md).

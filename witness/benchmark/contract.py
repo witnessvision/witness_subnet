@@ -168,6 +168,7 @@ class Reference(StrictModel):
 class Policy(StrictModel):
     """Every threshold that affects a decision; its hash is committed before a draw."""
     schema_version: Literal["witness-benchmark-policy-3"] = "witness-benchmark-policy-3"
+    scoring_version: Literal["claims-v1", "events-v2"] = "claims-v1"
     judge_id: str = Field(min_length=1)
     reviewer_id: str | None = None  # optional blind review of claims absent from the reference
     runtime_hash: Digest

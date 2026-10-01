@@ -11,10 +11,19 @@ from .submission import challenge_id, parse_submission
 
 
 class Ledger:
-    def __init__(self, path: Path, *, activation_block: int, activation_epoch: int, policy: str):
+    def __init__(self, path: Path, *, activation_block: int, activation_epoch: int, policy: str, policy_upgrade: dict | None = None):
         if activation_block < 1 or activation_epoch < 0:
             raise ValueError('explicit_activation_block_and_epoch_required')
         self.activation_block, self.activation_epoch, self.policy = activation_block, activation_epoch, policy
+        self.policy_upgrade = policy_upgrade
+        if policy_upgrade is not None:
+            import re
+            if (set(policy_upgrade) != {'first_window','previous_policy'} or
+                    type(policy_upgrade['first_window']) is not int or policy_upgrade['first_window'] < ZERO_BURN_WINDOW or
+                    not isinstance(policy_upgrade['previous_policy'],str) or
+                    not re.fullmatch('[0-9a-f]{64}',policy_upgrade['previous_policy']) or
+                    policy_upgrade['previous_policy'] == policy):
+                raise ValueError('invalid_policy_upgrade_schedule')
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -34,6 +43,27 @@ class Ledger:
         expected = {'block': activation_block, 'epoch': activation_epoch, 'policy': policy}
         self.versioned_media = policy == policy_identity()
         previous = self.get('activation')
+        saved_upgrade = self.get('policy_upgrade')
+        if saved_upgrade is not None and saved_upgrade != policy_upgrade:
+            raise ValueError('policy_upgrade_schedule_changed')
+        if policy_upgrade is not None and saved_upgrade is None:
+            if previous is not None and previous != {**expected,'policy':policy_upgrade['previous_policy']}:
+                raise ValueError('policy_upgrade_source_mismatch')
+            first = policy_upgrade['first_window']
+            if self.db.execute('SELECT 1 FROM windows WHERE id>=? LIMIT 1',(first,)).fetchone():
+                raise ValueError('policy_upgrade_requires_unopened_window')
+            # A new follower receives this same schedule before historical replay.
+            # Existing openings, decisions, uses and commitments are never rewritten.
+            with self.lock:
+                self.db.execute('BEGIN IMMEDIATE')
+                try:
+                    self.set('policy_upgrade',policy_upgrade)
+                    self.set('activation',expected)
+                    self.db.execute('COMMIT')
+                except BaseException:
+                    self.db.execute('ROLLBACK')
+                    raise
+            previous = expected
         if (previous and previous['block'] == activation_block and previous['epoch'] == activation_epoch
                 and previous['policy'] in (LEGACY_POLICY, FIVE_VIDEO_POLICY, TEN_VIDEO_POLICY, RESUME_POLICY) and self.versioned_media):
             self._migrate_media_policy(expected, previous['policy'])
@@ -51,7 +81,11 @@ class Ledger:
             return FIVE_VIDEO_POLICY
         if window < RESUME_WINDOW:
             return TEN_VIDEO_POLICY
-        return RESUME_POLICY if window < ZERO_BURN_WINDOW else self.policy
+        if window < ZERO_BURN_WINDOW:
+            return RESUME_POLICY
+        if self.policy_upgrade and window < self.policy_upgrade['first_window']:
+            return self.policy_upgrade['previous_policy']
+        return self.policy
 
     def _migrate_media_policy(self, expected, previous_policy):
         """The sole supported transition; reject any already reported affected window.

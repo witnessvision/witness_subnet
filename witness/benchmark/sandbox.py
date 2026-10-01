@@ -138,6 +138,13 @@ class Broker:
             expected_cancel = str(inside/'jobs'/job/(Path(spec).stem+'.cancel'))
             if data.get('cancel_path') != expected_cancel:
                 raise ValueError('sandbox_invalid_cancel_path')
+            if 'pause_after_tasks' in data or 'continue_path' in data:
+                expected_continue = str(inside/'jobs'/job/(Path(spec).stem+'.continue'))
+                if (type(data.get('pause_after_tasks')) is not int or
+                        not 0 < data['pause_after_tasks'] < len(entries) or
+                        data.get('continue_path') != expected_continue):
+                    raise ValueError('sandbox_invalid_continuation')
+
         else:
             if request['environment'] != 'omni':
                 raise ValueError('sandbox_invalid_architecture')

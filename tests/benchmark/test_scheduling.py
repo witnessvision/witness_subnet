@@ -181,6 +181,7 @@ def test_readmitted_model_cannot_use_old_panel_in_current_window(tmp_path, monke
 def test_download_failure_attributed_to_challenger_not_king(tmp_path, monkeypatch, baseline):
     from witness.benchmark.managed_evaluator import ManagedEvaluator, MinerUnavailable
     from witness.benchmark.evaluator import Evaluator
+    from witness.benchmark.contract import InfrastructureError
     worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
     def download(*args):
         raise ConnectionRefusedError()
@@ -188,7 +189,7 @@ def test_download_failure_attributed_to_challenger_not_king(tmp_path, monkeypatc
     monkeypatch.setattr(Evaluator, '_evaluate', lambda self, *a, **k: self.download())
     window = ledger.active
     entry = window['king'] if baseline else window['candidates'][MODELS[2]]
-    with pytest.raises(ConnectionRefusedError if baseline else MinerUnavailable):
+    with pytest.raises(InfrastructureError if baseline else MinerUnavailable):
         ManagedEvaluator._evaluate(worker, entry, window, snapshot(8), [], [])
     assert worker.download is download and not worker.outbox
 
@@ -259,9 +260,10 @@ def test_exhausted_download_does_not_block_sibling_or_consume_hotkey(tmp_path):
     triggers.defer(head['id'], 'DownloadBudgetExceeded', 500)
     triggers.recover_interrupted()
     assert [r['model_id'] for r in triggers.pending(10)] == [MODELS[0], MODELS[2]]
-    parked = next(r for r in triggers.rows() if r['id'] == head['id'])
-    assert parked['status'] == 'queued' and parked['usage'] == 'reserved'
-    assert parked['retry_block'] == 2**63 - 1
+    removed = triggers.db.execute('SELECT * FROM triggers WHERE id=?', (head['id'],)).fetchone()
+    assert removed['status'] == 'withdrawn' and removed['reason'] == 'download_time_limit'
+    assert removed['result'] is None and removed['finished_unix'] is None
+    assert removed['retry_block'] == 0
 
 
 def test_exhausted_download_never_creates_zero_score_or_outbox(tmp_path, monkeypatch):
@@ -273,8 +275,8 @@ def test_exhausted_download_never_creates_zero_score_or_outbox(tmp_path, monkeyp
     before = ledger.usage(worker.hotkey)
     with pytest.raises(DownloadBudgetExceeded):
         worker.run_once(ledger.active, snapshot(8))
-    row = next(r for r in worker.triggers.rows() if r['model_id'] == MODELS[2])
-    assert row['status'] == 'queued' and row['usage'] == 'reserved'
+    row = worker.triggers.db.execute('SELECT * FROM triggers WHERE model_id=?', (MODELS[2],)).fetchone()
+    assert row['status'] == 'withdrawn' and row['result'] is None
     assert ledger.usage(worker.hotkey) == before and not worker.outbox
 
 
@@ -286,7 +288,7 @@ def test_many_normal_turns_do_not_magnify_a_retryable_failure(tmp_path, reason):
     head = triggers.pending(1)[0]
     for _ in range(8):
         triggers.start(head['id'], 7)
-        triggers.defer(head['id'], 'attempt_budget_elapsed', 0)
+        triggers.defer(head['id'], 'window_changed', 0)
     triggers.start(head['id'], 7)
     triggers.defer(head['id'], reason, 1300)
     row = next(r for r in triggers.rows() if r['id'] == head['id'])
@@ -305,39 +307,36 @@ def test_restart_caps_legacy_io_backoff_but_preserves_exhausted_budget(tmp_path)
     recovered = triggers.recover_interrupted()
     after = triggers.rows()
     assert len(recovered) == 1 and after[0]['retry_block'] == 1005
-    assert after[1]['retry_block'] == 2**63 - 1
+    assert rows[1]['id'] not in {r['id'] for r in after}
+    assert triggers.db.execute('SELECT status FROM triggers WHERE id=?', (rows[1]['id'],)).fetchone()[0] == 'withdrawn'
     assert all(row['usage'] == 'reserved' for row in after)
 
 
-def test_compression_exclusion_survives_restart_and_preserves_first_binding(tmp_path):
+def test_compression_withdrawal_survives_restart_and_requires_fresh_binding(tmp_path):
     active = {MODELS[i]: entry(i) for i in range(3)}
     triggers = queue(tmp_path, active)
     triggers.current_block = lambda: 100
     head = next(r for r in triggers.rows() if r['model_id'] == MODELS[1])
     triggers.start(head['id'], 6)
     triggers.defer(head['id'], 'CompressionRequired')
-    assert MODELS[1] not in {r['model_id'] for r in triggers.pending(10)}
+    removed = triggers.db.execute('SELECT * FROM triggers WHERE id=?', (head['id'],)).fetchone()
+    assert removed['status'] == 'withdrawn' and removed['reason'] == 'compression_required'
+    assert removed['finished_unix'] is None and removed['result'] is None
     assert MODELS[2] in {r['model_id'] for r in triggers.pending(10)}
-    assert MODELS[1] not in {r['model_id'] for r in triggers.rows()}
-    excluded = triggers.excluded()[0]
-    assert excluded['usage'] == 'reserved' and excluded['result'] is None
-    assert excluded['finished_unix'] is None and excluded['retry_block'] == 125
     triggers.close()
     triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3', candidates=lambda: active,
                                  interruption=lambda window: None, current_block=lambda: 101)
     triggers.recover_interrupted()
-    spam = {**entry(1), 'block': 101, 'value': entry(2)['value']}
-    assert not triggers.observe([spam], {MINERS[1]}, coldkeys={MINERS[1]: 'shared'}, uids={MINERS[1]: 1})
-    assert len(triggers.excluded()) == 1
-    triggers.compression_retry(head['id'], ready=True, block=125)
+    triggers.observe([entry(1), {**entry(1), 'block': 101, 'value': entry(2)['value']}], {MINERS[1]})
+    assert head['id'] not in {r['id'] for r in triggers.rows()}
+    triggers.observe([{**entry(1), 'block': 101}], {MINERS[1]})
     revived = next(r for r in triggers.rows() if r['id'] == head['id'])
     assert all(revived[key] == head[key] for key in ('hotkey', 'model_id', 'block', 'value'))
-    assert revived['reason'] == 'compression_ready' and revived['retry_block'] == 0
+    assert revived['reason'] == 'resubmitted' and revived['readmission_block'] == 101
     assert revived['status'] == 'queued' and revived['usage'] == 'reserved'
-    assert not triggers.excluded()
 
 
-def test_compression_preflight_blocks_cached_challenger_before_batch_or_score(tmp_path, monkeypatch):
+def test_compression_preflight_requires_resubmission_even_after_transport_fixed(tmp_path, monkeypatch):
     from witness.benchmark.managed_evaluator import ManagedEvaluator
     from witness.benchmark.compression import CompressionRequired
     worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
@@ -355,36 +354,31 @@ def test_compression_preflight_blocks_cached_challenger_before_batch_or_score(tm
         worker.run_once(ledger.active, snapshot(8))
     assert calls == [MODELS[2]]
     assert ledger.usage(worker.hotkey) == before and not worker.outbox
-    row = worker.triggers.excluded()[0]
-    assert row['model_id'] == MODELS[2] and row['usage'] == 'reserved'
+    row = worker.triggers.db.execute('SELECT * FROM triggers WHERE model_id=?', (MODELS[2],)).fetchone()
+    assert row['status'] == 'withdrawn' and row['result'] is None
     assert not list(tmp_path.glob('windows/*/models/*/score.json'))
-    assert not worker.triggers.pending(10)
-    # Recovery does not run early, then requeues exactly the same entry.
-    worker._recover_compression(ledger.active, snapshot(32))
-    assert len(calls) == 1
-    worker.compression_check = lambda *args: None
-    worker._recover_compression(ledger.active, snapshot(33))
-    assert not worker.triggers.excluded()
-    assert worker.triggers.pending()[0]['id'] == row['id']
-    assert ledger.usage(worker.hotkey) == before and not worker.outbox
+    worker.compression_check = lambda *args: pytest.fail('withdrawn miner was auto-probed')
+    worker.run_once(ledger.active, snapshot(8))
+    assert not worker.triggers.pending(10) and ledger.usage(worker.hotkey) == before
 
 
-def test_failed_compression_recovery_is_bounded_and_never_scores(tmp_path, monkeypatch):
-    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
-    row = worker.triggers.pending()[0]
-    worker.triggers.start(row['id'], ledger.active['id'])
-    worker.triggers.defer(row['id'], 'CompressionRequired')
-    calls = []
-    def unavailable(entry, snapshot, cancelled, timeout_s):
-        calls.append(timeout_s)
-        raise TimeoutError('unreachable')
-    worker.compression_check = unavailable
-    worker._recover_compression(ledger.active, snapshot(33))
-    excluded = worker.triggers.excluded()[0]
-    assert calls == [5.] and excluded['retry_block'] == 58
-    assert excluded['result'] is None and excluded['usage'] == 'reserved' and not worker.outbox
-    worker._recover_compression(ledger.active, snapshot(34))
-    assert calls == [5.]
+def test_restart_migrates_parked_download_and_compression_without_consumption(tmp_path):
+    active = {MODELS[i]: entry(i) for i in range(3)}
+    triggers = queue(tmp_path, active)
+    rows = triggers.rows()
+    triggers.db.execute("UPDATE triggers SET status='excluded',reason='compression_required' WHERE id=?", (rows[0]['id'],))
+    triggers.db.execute("UPDATE triggers SET reason='DownloadBudgetExceeded',retry_block=? WHERE id=?", (2**63-1, rows[1]['id']))
+    triggers.close()
+    triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3', candidates=lambda: active,
+                                 interruption=lambda window: None, current_block=lambda: 100)
+    triggers.recover_interrupted()
+    for row in rows[:2]:
+        saved = triggers.db.execute('SELECT * FROM triggers WHERE id=?', (row['id'],)).fetchone()
+        assert saved['status'] == 'withdrawn' and saved['removed_block'] == 100
+        assert saved['result'] is None and saved['finished_unix'] is None
+    assert [r['id'] for r in triggers.pending(10)] == [rows[2]['id']]
+    triggers.observe([entry(0), entry(1)], set(MINERS[:2]))
+    assert [r['id'] for r in triggers.pending(10)] == [rows[2]['id']]
 
 
 def test_miner_download_limit_withdraws_without_hotkey_use_and_preserves_sibling(tmp_path, monkeypatch):
@@ -431,3 +425,127 @@ def test_round_budget_parks_only_same_window_survives_restart_and_releases_sibli
     assert MODELS[1] in {r['model_id'] for r in triggers.pending(10)}
     row = next(r for r in triggers.rows() if r['id'] == head['id'])
     assert row['result'] is None and row['usage'] == 'reserved'
+
+
+@pytest.mark.parametrize('reason', ['EvaluationRoundBudgetExceeded',
+                                    'attempt_budget_elapsed', 'InterruptedError'])
+def test_timeout_retry_limit_survives_restart_and_requires_fresh_submission(tmp_path, reason):
+    active = {MODELS[i]: entry(i) for i in range(3)}
+    current = [6]
+    deadline = [reason == 'InterruptedError']
+    def interruption(window):
+        if window != current[0]:
+            return 'window_changed'
+        return 'attempt_budget_elapsed' if deadline[0] else None
+    triggers = queue(tmp_path, active, interruption)
+    triggers.current_block = lambda: 100
+    head = next(r for r in triggers.rows() if r['model_id'] == MODELS[1])
+    triggers.start(head['id'], 6)
+    triggers.defer(head['id'], reason)
+    triggers.defer(head['id'], reason)  # Repeated notification is not another failure.
+    assert triggers.db.execute('SELECT timeout_failures FROM triggers WHERE id=?',
+                               (head['id'],)).fetchone()[0] == 1
+    triggers.close()
+    current[0], deadline[0] = 7, False
+    triggers = ScheduledTriggers(tmp_path/'triggers.sqlite3', candidates=lambda: active,
+                                 interruption=interruption, current_block=lambda: 100)
+    triggers.recover_interrupted()
+    triggers.start(head['id'], 7)
+    triggers.defer(head['id'], 'EvaluationRoundBudgetExceeded')
+    saved = dict(triggers.db.execute('SELECT * FROM triggers WHERE id=?', (head['id'],)).fetchone())
+    assert saved['status'] == 'withdrawn' and saved['timeout_failures'] == 2
+    assert saved['reason'] == 'retry_limit_exceeded' and saved['removed_block'] == 100
+    assert saved['result'] is None and saved['finished_unix'] is None
+    assert MODELS[1] not in {r['model_id'] for r in triggers.pending(100)}
+    assert MODELS[2] in {r['model_id'] for r in triggers.pending(100)}
+    triggers.observe([entry(1)], {MINERS[1]})  # Old chain replay cannot readmit.
+    assert not any(r['id'] == head['id'] for r in triggers.rows())
+    triggers.observe([{**entry(1), 'block': 101}], {MINERS[1]})
+    readmitted = next(r for r in triggers.rows() if r['id'] == head['id'])
+    assert readmitted['timeout_failures'] == 0 and readmitted['usage'] == 'reserved'
+    assert not triggers.pending(100, before_block=101, current_block=101)[0]['id'] == head['id']
+    triggers.close()
+
+
+@pytest.mark.parametrize('planned', ['window_changed', 'validator_stopping', 'epoch_changed'])
+def test_planned_cancellation_does_not_spend_timeout_retry(tmp_path, planned):
+    triggers = queue(tmp_path, {MODELS[i]: entry(i) for i in range(3)}, lambda window: planned)
+    head = triggers.pending()[0]
+    for _ in range(4):
+        triggers.start(head['id'], 6)
+        triggers.defer(head['id'], 'EvaluationRoundBudgetExceeded')
+    row = next(r for r in triggers.rows() if r['id'] == head['id'])
+    assert row['timeout_failures'] == 0 and row['reason'] == planned
+    triggers.close()
+
+
+@pytest.mark.parametrize('error,expected', [
+    ('invalid_model_package', 'MinerInvalidPackage'),
+    ('incomplete_model_chunk', 'MinerUnavailable'),
+])
+def test_challenger_package_failure_withdraws_without_publishing_result(tmp_path, monkeypatch, error, expected):
+    from witness.benchmark import managed_evaluator as managed
+    from witness.benchmark.evaluator import ModelRejected
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    candidate = worker.triggers.pending()[0]
+    worker.triggers.start(candidate['id'], ledger.active['id'])
+    def bad_download(*args):
+        raise ModelRejected(error) if expected == 'MinerInvalidPackage' else OSError(error)
+    worker.download = bad_download
+    before = ledger.usage(worker.hotkey)
+    with pytest.raises(getattr(managed, expected)):
+        worker._evaluate(candidate, ledger.active, snapshot(8), [], [])
+    worker.triggers.defer(candidate['id'], expected)
+    row = worker.triggers.db.execute('SELECT * FROM triggers WHERE id=?', (candidate['id'],)).fetchone()
+    assert row['status'] == 'withdrawn' and row['result'] is None and row['finished_unix'] is None
+    assert ledger.usage(worker.hotkey) == before and not worker.outbox
+
+
+def test_king_package_failure_never_withdraws_challenger(tmp_path, monkeypatch):
+    from witness.benchmark.evaluator import ModelRejected
+    from witness.benchmark.contract import InfrastructureError
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    def bad_download(*args):
+        raise ModelRejected('invalid_model_package')
+    worker.download = bad_download
+    candidate = worker.triggers.pending()[0]
+    with pytest.raises(InfrastructureError, match='king_model_acquisition_failed'):
+        worker._evaluate(ledger.active['king'], ledger.active, snapshot(8), [], [])
+    assert candidate['id'] in {r['id'] for r in worker.triggers.pending()}
+    assert not worker.outbox
+
+
+@pytest.mark.parametrize('reason', ['InfrastructureError', 'TimeoutError', 'InfrastructureRoundBudgetExceeded'])
+def test_validator_failures_never_spend_miner_retry_or_withdraw(tmp_path, reason):
+    current = [6]
+    deadline = [True]
+    def interruption(window):
+        if window != current[0]:
+            return 'window_changed'
+        return 'attempt_budget_elapsed' if deadline[0] else None
+    active = {MODELS[i]: entry(i) for i in range(3)}
+    triggers = queue(tmp_path, active, interruption)
+    head = triggers.pending()[0]
+    for _ in range(4):
+        triggers.start(head['id'], 6)
+        triggers.defer(head['id'], reason)
+    saved = triggers.db.execute('SELECT * FROM triggers WHERE id=?', (head['id'],)).fetchone()
+    assert saved['status'] == 'queued' and saved['timeout_failures'] == 0 and saved['result'] is None
+    if reason == 'InfrastructureRoundBudgetExceeded':
+        assert head['id'] not in {r['id'] for r in triggers.pending(100)}
+        current[0], deadline[0] = 7, False
+        assert head['id'] in {r['id'] for r in triggers.pending(100)}
+
+
+@pytest.mark.parametrize('reason', ['CompressionRequired', 'MinerInvalidPackage', 'MinerUnavailable',
+                                    'MinerDownloadExpired', 'DownloadBudgetExceeded'])
+def test_miner_failure_at_deadline_requires_fresh_submission(tmp_path, reason):
+    triggers = queue(tmp_path, {MODELS[i]: entry(i) for i in range(3)},
+                     lambda window: 'attempt_budget_elapsed')
+    head = triggers.pending()[0]
+    triggers.start(head['id'], 6)
+    triggers.defer(head['id'], reason)
+    row = triggers.db.execute('SELECT * FROM triggers WHERE id=?', (head['id'],)).fetchone()
+    assert row['status'] == 'withdrawn' and row['result'] is None and row['finished_unix'] is None
+    triggers.observe([entry(0)], {MINERS[0]})
+    assert head['id'] not in {r['id'] for r in triggers.rows()}

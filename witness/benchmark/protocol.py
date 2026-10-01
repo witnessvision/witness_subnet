@@ -140,7 +140,7 @@ def policy_identity() -> str:
     files = ("reward.py", "scoring.py", "contract.py", "adjudication.py", "judge.py", "annotate.py",
              "media.py", "pod_runtime.py", "pod_audio.py", "pod_setup.sh", "protocol.py", "ledger.py",
              "submission.py", "triggers.py", "evaluator.py", "pool.py", "duel.py", "runner.py", "stopping.py",
-             "execution.py")
+             "execution.py", "event_scoring.py", "novel_review.py")
     catalog = here / "data" / "catalogue-v2.json"
     hashes = {name: hashlib.sha256((here / name).read_bytes()).hexdigest() for name in files}
     hashes.update({str(p.relative_to(here)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -156,7 +156,9 @@ def policy_identity() -> str:
                          "early_stop": "finite-batch-90-one-look-after-three-generalized",
                          "burn_fraction": BURN_FRACTION,
                          "label_model": "gpt-6-luna", "judge_model": "gpt-5.6-terra",
-                         "margin": .02, "controls_max": .05, "quality_floor": .05})
+                         "margin": .02, "controls_max": .05, "quality_floor": .05,
+                         "scoring": "events-v2", "quality_weight": .9, "time_weight": .1,
+                         "novel_review": "visual-text-8-precision-only-v1"})
 
 
 def decide(results: list[dict], *, window: int, policy: str, king: dict | None,

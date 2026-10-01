@@ -203,6 +203,15 @@ def supervise(job, out, *, worker=_worker, context=None):
         # Jobs are immutable and retries use a new output path; never append stale attempts.
         with out.open("w") as stream:
             for index, task in enumerate(job["tasks"]):
+                if index == job.get('pause_after_tasks'):
+                    continuation = Path(job['continue_path'])
+                    while not continuation.exists():
+                        if time.monotonic() >= deadline or (cancel_path and cancel_path.exists()):
+                            raise InterruptedError('evaluation_cancelled_or_budget_expired')
+                        time.sleep(.05)
+                    if json.loads(continuation.read_text()) != {'continue': True}:
+                        break
+
                 if process is None:
                     hardware = None
                     pipe, child = context.Pipe()

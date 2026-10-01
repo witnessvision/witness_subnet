@@ -11,17 +11,12 @@ Sampling (``EVAL``)
     private to each validator, so nobody can compute its windows in advance.
 
 One clip
-    Every window has ``references`` independent Luna labelings. A claim counts as
-    supported when any reference supports it and as contradicted only when every
-    reference contradicts it; recall is the mean recall over the references.
-    As in ``scoring.score``, supported credit is capped at the distinct facts
-    covered (the most any single reference has covered), so repeating or
-    paraphrasing a truth adds nothing. ``clip_score`` is the F1 of that
-    precision and recall.
-    ``clip_reward = clip_score × (clip_weight + time_weight × time_score)`` with
-    ``time_score = 1 − elapsed / deadline`` clamped to [0, 1]: speed scales what
-    the answer earned, so a fast empty or wrong answer earns nothing. An invalid
-    answer (unparseable, late, no media tokens) earns zero.
+    events-v2 scores unique supported factual events, salience-weighted recall
+    and temporal coverage. Bounded visual review can repair precision only.
+    claims-v1 retains the historical claim-count and modality-mean scoring.
+    ``clip_reward = quality * (clip_weight + time_weight * time_score)``;
+    events-v2 uses 0.9/0.1, while legacy duel grading keeps 0.8/0.2.
+    Invalid answers earn zero; time_score is clamped 1 - elapsed / deadline.
 
 Aggregation
     ``video_score`` is the mean over that video's clips and ``eval_score`` the
@@ -49,8 +44,8 @@ class EvalSpec(StrictModel):
     videos: int = Field(default=10, ge=1)
     clips_per_video: int = Field(default=2, ge=1)
     references: int = Field(default=2, ge=1)
-    clip_weight: float = Field(default=.8, ge=0, le=1)
-    time_weight: float = Field(default=.2, ge=0, le=1)
+    clip_weight: float = Field(default=.9, ge=0, le=1)
+    time_weight: float = Field(default=.1, ge=0, le=1)
 
     @property
     def identity(self) -> str:
@@ -99,8 +94,11 @@ def reward(quality: float, elapsed_s: float, duration: float, policy: Policy, *,
     return {"quality": quality, "speed": speed, "reward": clip_reward(quality, speed, valid=True, spec=spec)}
 
 
-def combine(references: list[Reference], response: Response, assessments: list[Assessment], policy: Policy) -> dict:
+def combine(references: list[Reference], response: Response, assessments: list[Assessment], policy: Policy, *, reviews=None) -> dict:
     """Clip score of one answer against several independent labelings of the same clip."""
+    if policy.scoring_version == 'events-v2':
+        from .event_scoring import measure
+        return measure(references, response, assessments, policy, reviews)
     scores = [score(reference, response, assessment, policy) for reference, assessment in zip(references, assessments)]
     recall = sum(item["recall"] for item in scores) / len(scores)
     if not response.claims:

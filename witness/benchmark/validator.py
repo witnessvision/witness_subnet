@@ -20,10 +20,11 @@ from .protocol import policy_identity, weight_vector, weights_match
 
 class Validator:
     def __init__(self, *, hotkey, root, chain, store, ledger, set_weights=None, evaluator=None,
-                 publication_store=None, telemetry=None):
+                 publication_store=None, telemetry=None, burn_all=False):
         self.hotkey, self.root, self.chain, self.store, self.ledger = hotkey, Path(root), chain, store, ledger
         self.set_weights, self.evaluator = set_weights, evaluator
         self.telemetry = telemetry
+        self.burn_all = burn_all
         self.publication_store = publication_store or store
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='witness-chain-writer')
@@ -104,10 +105,14 @@ class Validator:
         king = decision.get('king')
         if king and king['hotkey'] not in snapshot['uids']:
             king = None
-        vector = weight_vector(king, snapshot)
+        shadow_vector = weight_vector(king, snapshot)
+        vector = weight_vector(None, snapshot) if self.burn_all else shadow_vector
+        if self.burn_all and vector['uids']:
+            vector = {**vector, 'source': 'burn_override'}
         intent = {**vector, 'block': head, 'block_hash': snapshot['block_hash'], 'mode': self.mode,
                   'validator': self.hotkey, 'window': self.ledger.active, 'caught_up': caught_up,
-                  'set_weights': self.set_weights is not None, 'decision': decision}
+                  'set_weights': self.set_weights is not None, 'burn_all': self.burn_all, 'decision': decision,
+                  'king': king, 'without_burn_override': shadow_vector}
         if caught_up and self.evaluator:
             self.evaluator.update(snapshot)
         if caught_up and self.future is None:
@@ -117,7 +122,7 @@ class Validator:
                         or max(vector['weights']) > snapshot.get('max_weight', 65535) / 65535 + 1 / 65535):
                     raise RuntimeError('chain_disallows_burn_allocation')
                 operation = {'kind': 'weights', 'block': head, 'uids': vector['uids'], 'weights': vector['weights'],
-                             'hotkey': king['hotkey'] if king else None}
+                             'hotkey': king['hotkey'] if king and not self.burn_all else None}
                 write_private(self.root / 'weight-send.json', {**operation, 'status': 'submitting'})
                 self.operation = operation
                 self.future = self.executor.submit(self.set_weights, vector['uids'], vector['weights'])
@@ -127,7 +132,7 @@ class Validator:
                     self.operation = {'kind': 'commitment', 'block': head}
                     self.future = self.executor.submit(self.evaluator.flush_one, self.publication_store, snapshot)
         observed = self.chain.applied_weights(self.hotkey, snapshot) if self.hotkey in snapshot['uids'] else None
-        intent['weights_applied'] = ({'hotkey': king['hotkey'] if king else None,
+        intent['weights_applied'] = ({'hotkey': king['hotkey'] if king and not self.burn_all else None,
                                       'block': snapshot.get('last_update', {}).get(self.hotkey),
                                       'uids': vector['uids'], 'weights': vector['weights']}
                                      if weights_match(observed, vector) else None)
@@ -170,7 +175,8 @@ class Validator:
             'window': window, 'king': intent['king'], 'triggers': triggers, 'evaluations': evaluations,
             'caught_up': intent['caught_up'],
             'progress': self._load('progress.json'),
-            'weights': {'intended': {k: intent[k] for k in ('uids', 'weights', 'source', 'burn_uid',
+            'weights': {'burn_all': self.burn_all, 'without_burn_override': intent.get('without_burn_override'),
+                        'intended': {k: intent[k] for k in ('uids', 'weights', 'source', 'burn_uid',
                         'king_uid', 'burn_fraction', 'king_fraction')},
                         'decision': {'hotkey': (decision.get('king') or {}).get('hotkey'), 'block': decision['block'],
                                      'inconclusive': decision.get('inconclusive', [])}
@@ -221,6 +227,8 @@ def main():
     parser.add_argument('--netuid', type=int, default=20)
     parser.add_argument('--activation-block', type=int, required=True)
     parser.add_argument('--activation-epoch', type=int, required=True)
+    parser.add_argument('--eval-upgrade-window', type=int)
+    parser.add_argument('--previous-policy')
     parser.add_argument('--root', type=Path, default=Path.home() / '.witness' / 'validator-v2')
     parser.add_argument('--wallet-name', default='default')
     parser.add_argument('--wallet-hotkey', default='default')
@@ -238,6 +246,8 @@ def main():
     parser.add_argument('--web-host', default='127.0.0.1')
     parser.add_argument('--telemetry-url', help='Optional HTTPS /api/telemetry for signed display status')
     args = parser.parse_args()
+    if (args.eval_upgrade_window is None) != (args.previous_policy is None):
+        parser.error('--eval-upgrade-window and --previous-policy are required together')
     if args.hotkey and (args.set_weights or args.publish_results or args.mode == 'evaluator' or args.telemetry_url):
         parser.error('--hotkey is only for a read-only CPU follower; evaluator needs a signing hotkey for P2P')
     if args.mode == 'evaluator' and not args.config:
@@ -246,6 +256,9 @@ def main():
         parser.error('followers do not publish independent evaluations')
     if args.env:
         load_env(args.env)
+    burn_value = os.environ.get('BURN_ALL', '0')
+    if burn_value not in ('0', '1'):
+        parser.error('BURN_ALL must be 0 or 1')
     root = args.root.expanduser()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (root / 'validator.lock').open('a')
@@ -258,7 +271,9 @@ def main():
     hotkey = args.hotkey or str(wallet.hotkey.ss58_address)
     chain, writer_chain = Chain(args.network, args.netuid), None
     ledger = Ledger(root / 'chain.sqlite3', activation_block=args.activation_block,
-                    activation_epoch=args.activation_epoch, policy=policy_identity())
+                    activation_epoch=args.activation_epoch, policy=policy_identity(),
+                    policy_upgrade=({'first_window':args.eval_upgrade_window,'previous_policy':args.previous_policy}
+                                    if args.eval_upgrade_window is not None else None))
     store = ChainCommitments(chain.subtensor, args.netuid)
     publish_store = None
     set_weights = None
@@ -279,7 +294,7 @@ def main():
         telemetry = TelemetrySender(args.telemetry_url, wallet.hotkey)
     validator = Validator(hotkey=hotkey, root=root, chain=chain, store=store, ledger=ledger,
                           evaluator=evaluator, set_weights=set_weights, publication_store=publish_store,
-                          telemetry=telemetry)
+                          telemetry=telemetry, burn_all=burn_value == '1')
     server = None
     if args.status_port:
         from .status import serve_status

@@ -108,6 +108,9 @@ def validate_assessment(reference: Reference, response: Response,
 
 
 def score(reference: Reference, response: Response, assessment: Assessment, policy: Policy) -> dict:
+    if policy.scoring_version == 'events-v2':
+        from .event_scoring import measure
+        return measure([reference], response, [assessment], policy)
     validate_assessment(reference, response, assessment, policy)
     decisions = {item.prediction_id: item for item in assessment.decisions}
     facts = {fact.claim.id: fact for fact in reference.facts}

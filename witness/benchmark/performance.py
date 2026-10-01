@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import math
 import time
+import threading
 
 from witness.storage import write_private
 
@@ -15,6 +16,8 @@ class Performance:
         self.started, self.started_unix = time.monotonic(), time.time()
         self.phases, self.clips = {}, []
         self.models = []
+        self.lock = threading.Lock()
+        self.phase_intervals, self.phase_work = {}, {}
 
     @contextmanager
     def phase(self, name):
@@ -22,7 +25,12 @@ class Performance:
         try:
             yield
         finally:
-            self.phases[name] = self.phases.get(name, 0.) + time.monotonic()-started
+            finished = time.monotonic()
+            from .event_scoring import intervals, length
+            with self.lock:
+                self.phase_work[name] = self.phase_work.get(name,0.)+finished-started
+                self.phase_intervals[name] = intervals(self.phase_intervals.get(name,[])+[(started,finished)])
+                self.phases[name] = length(self.phase_intervals[name])
 
     def finish(self, status, error=None):
         elapsed = time.monotonic()-self.started
@@ -31,7 +39,7 @@ class Performance:
         count = previous.get('attempts', 0)+1
         row = {'status': status, 'error_type': type(error).__name__ if error else None,
                'started_unix': self.started_unix, 'finished_unix': time.time(), 'active_s': elapsed,
-               'phases_s': self.phases, 'models': self.models, 'clips': self.clips}
+               'phases_s': self.phases, 'phase_work_s': self.phase_work, 'models': self.models, 'clips': self.clips}
         cumulative = dict(previous.get('cumulative_phases_s', {}))
         for key,value in self.phases.items(): cumulative[key] = cumulative.get(key,0.)+value
         data = {'schema_version':'witness-performance-1','window_id':self.window['id'],

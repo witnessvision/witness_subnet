@@ -314,7 +314,7 @@ def test_reward_averages_videos_and_random_batch_defaults():
     assert (EVAL.videos, EVAL.clips_per_video, EVAL.references) == (10, 2, 2)
     assert windows('a', 100, 'a'*64) != windows('a', 100, 'b'*64)
     assert len(windows('a', 100, 'a'*64)) == 2
-    assert clip_reward(0, 1, valid=True) == 0 and clip_reward(1, 0, valid=True) == .8
+    assert clip_reward(0, 1, valid=True) == 0 and clip_reward(1, 0, valid=True) == .9
     rows = [{'video': 'a', 'quality': 1., 'reward': 1.}]*9 + [{'video': 'b', 'quality': 0., 'reward': 0.}]
     assert eval_score(video_scores(rows)) == {'videos': 2, 'quality': .5, 'reward': .5}
 
@@ -641,3 +641,26 @@ def test_partial_bootstrap_can_retry_same_hotkey_on_fresh_window(tmp_path):
         ledger.ingest(snapshot(block), rows)
     assert ledger.get('king')['hotkey']==MINERS[0]
     assert {value['window'] for value in ledger.usage(VALS[0]).values()}=={2}
+
+
+def test_burn_override_sends_only_burn_and_retains_shadow_king(tmp_path):
+    from witness.benchmark.validator import Validator
+    ledger = fill_ledger(tmp_path)
+    class Chain:
+        def head(self): return 8
+        def snapshot(self, height=None): return snapshot(8)
+        def applied_weights(self, *args): return [(6, 65535)]
+    sent = []
+    validator = Validator(hotkey=VALS[0], root=tmp_path, chain=Chain(),
+        store=FileCommitments(tmp_path/'transport'), ledger=ledger, burn_all=True,
+        set_weights=lambda u,w: sent.append((u,w)) or {'success':True})
+    intent = validator.step()
+    validator.future.result(timeout=3)
+    assert sent == [([6],[1.])]
+    assert intent['burn_all'] and intent['source'] == 'burn_override'
+    assert intent['without_burn_override']['uids'] == [1]
+    assert intent['king']['hotkey'] == MINERS[1]
+    assert intent['weights_applied']['uids'] == [6]
+    public = json.loads((tmp_path/'queue.json').read_text())
+    assert public['weights']['without_burn_override']['uids'] == [1]
+    validator.close(); ledger.close()

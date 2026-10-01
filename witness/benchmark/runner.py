@@ -60,11 +60,14 @@ def setup_main():
 
 
 def _run_job(gpu: Gpu, script: str, environment: str, spec: dict, local: Path, remote: str,
-             seconds: float, *, cancelled=lambda: False) -> tuple[int, str]:
+             seconds: float, *, cancelled=lambda: False, on_row=None, pause_after=None, continue_batch=None) -> tuple[int, str]:
     """Send one job spec, run ``script`` on it for at most ``seconds``; return (exit status, output lines)."""
     cancel_path = f'{remote}/{local.stem}.cancel'
     if script == 'pod_runtime.py':
         spec = {**spec, 'cancel_path': cancel_path, 'job_timeout_s': seconds}
+    continue_path = f'{remote}/{local.stem}.continue'
+    if pause_after is not None:
+        spec = {**spec, 'pause_after_tasks': pause_after, 'continue_path': continue_path}
     write_private(local, spec)
     gpu.put([local], f"{remote}/{local.name}")
     workspace = gpu.workspace
@@ -73,8 +76,36 @@ def _run_job(gpu: Gpu, script: str, environment: str, spec: dict, local: Path, r
                f"HF_HOME={workspace}/hf", f"{workspace}/envs/{environment}/bin/python", f"{workspace}/{script}",
                f"{remote}/{local.name}", output]
     done = threading.Event()
+    seen, errors = set(), []
+    offset = 0
+    def deliver(lines):
+        for line in lines.splitlines():
+            row = json.loads(line)
+            key = row['task_id']
+            if key in seen:
+                continue
+            if on_row:
+                on_row(row)
+            seen.add(key)
+            if pause_after is not None and len(seen) == pause_after:
+                decision = bool(continue_batch())
+                acknowledgment = local.with_suffix('.continue')
+                write_private(acknowledgment, {'continue':decision})
+                gpu.put([acknowledgment], continue_path)
     def watch():
+        nonlocal offset
         while not done.wait(.25):
+            if on_row:
+                try:
+                    lines, offset = gpu.read_available(output, offset)
+                    deliver(lines)
+                except Exception as exc:
+                    errors.append(exc)
+                    try:
+                        gpu.run(['touch', cancel_path], timeout=5)
+                    except (OSError, InfrastructureError, InterruptedError):
+                        pass
+                    return
             if cancelled():
                 try:
                     gpu.run(['touch', cancel_path], timeout=5)
@@ -90,13 +121,19 @@ def _run_job(gpu: Gpu, script: str, environment: str, spec: dict, local: Path, r
         status, stderr = TIMED_OUT, "ssh_timeout"
     finally:
         done.set()
-        watcher.join(timeout=6)
+        # A grading callback may still be draining the bounded prefix.
+        # Never deliver the final output concurrently with that callback.
+        watcher.join()
         if script == 'pod_runtime.py':
             try:
                 write_private(local.with_suffix('.output.json'), {'lines': gpu.read(output)})
             except (OSError, InfrastructureError):
                 pass  # Keep the original failure; an unreadable artifact cannot be reused.
     write_private(local.with_suffix(".log.json"), {"returncode": status, "stderr": stderr[-4000:]})
+    if errors:
+        raise errors[0]
+    if on_row:
+        deliver(gpu.read(output))
     if "gpu_unhealthy" in stderr:
         gpu.discard()
         raise InfrastructureError("gpu_unhealthy")
@@ -133,6 +170,9 @@ class PodRunner:
         self.verified = set()
         self.execution_cache = None
         self.reused_task_ids = set()
+        self.on_execution = None
+        self.pause_after = None
+        self.continue_batch = None
 
     def _binding(self, model_id, task):
         return content_hash({'model_id': model_id, 'task': task.model_dump(),
@@ -170,11 +210,32 @@ class PodRunner:
             key = self._binding(model_id, task)
             store_immutable(self.execution_cache / (key + '.json'), {'binding': key, 'row': row})
 
+    def stream(self, models, tasks, paths, *, on_execution, pause_after=None, continue_batch=None):
+        if not hasattr(self.gpu, 'read_available'):
+            raise InfrastructureError('streaming_requires_local_gpu')
+        self.on_execution, self.pause_after, self.continue_batch = on_execution, pause_after, continue_batch
+        try:
+            return self(models,tasks,paths)
+        finally:
+            self.on_execution = self.pause_after = self.continue_batch = None
+
     def __call__(self, models: list[str], tasks: list[Task], paths: list[Path]) -> dict[str, dict[str, Execution]]:
         if self.cancelled() or self.remaining_s() <= 0:
             raise InfrastructureError('evaluation_cancelled_or_budget_expired')
         saved = {model: self._saved(model, tasks) for model in models}
         self.reused_task_ids = {(model,task) for model,rows in saved.items() for task in rows}
+        identities = {row['hardware_id'] for rows in saved.values() for row in rows.values()}
+        if len(identities) > 1 or (identities and self.hardware_id not in (None, next(iter(identities)))):
+            raise InfrastructureError('gpu_changed_during_job')
+        if identities:
+            self.hardware_id = next(iter(identities))
+        if self.on_execution:
+            # Emit cached answers in draw order, just like fresh answers.
+            for model in models:
+                for task in tasks:
+                    if task.id in saved[model]:
+                        self.hardware_id = saved[model][task.id]['hardware_id']
+                        self.on_execution(self._execution(model, task, saved[model][task.id]))
         if all(len(saved[model]) == len(tasks) for model in models):
             identities = {row['hardware_id'] for rows in saved.values() for row in rows.values()}
             if len(identities) != 1:
@@ -221,12 +282,31 @@ class PodRunner:
             # video. Reload/warmup are bounded inside the attempt budget.
             seconds = min(self.remaining_s(), 120 + sum(self.policy.deadline_s(task.duration) for task in tasks)
                           + max(self.policy.deadline_s(task.duration) for task in tasks) + 5)
+            if self.on_execution:
+                seconds = min(self.remaining_s(), 2700.)
             if seconds <= 0 or self.cancelled():
                 raise InfrastructureError('evaluation_cancelled_or_budget_expired')
             artifact = self.gpu.root / 'jobs' / self.job / f'{model_id}-{self.batch_index}.json'
             try:
+                def completed(row):
+                    hardware = row.get('hardware_id')
+                    if not hardware or self.hardware_id not in (None,hardware):
+                        raise InfrastructureError('gpu_changed_during_job')
+                    self.hardware_id = hardware
+                    self._save_lines(model_id, tasks, json.dumps(row))
+                    task = next((t for t in tasks if t.id == row.get('task_id')), None)
+                    if task is None:
+                        raise InfrastructureError('unexpected_stream_task')
+                    self.on_execution(self._execution(model_id, task, row))
+                pause = self.pause_after
+                if pause is not None:
+                    pause -= sum(t.id in saved[model_id] for t in requested_tasks[:pause])
+                    if pause <= 0:
+                        pause = None
                 status, lines = _run_job(self.gpu, "pod_runtime.py", ENVIRONMENTS[manifest["arch"]], spec,
-                                         artifact, remote, seconds, cancelled=self.cancelled)
+                                         artifact, remote, seconds, cancelled=self.cancelled,
+                                         on_row=completed if self.on_execution else None,
+                                         pause_after=pause, continue_batch=self.continue_batch)
             except (InfrastructureError, InterruptedError):
                 output = artifact.with_suffix('.output.json')
                 if output.exists():

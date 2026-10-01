@@ -48,7 +48,7 @@ def cases(rows: list[dict], policy: Policy, seed: str) -> list[tuple[Case, list[
 
 
 def grade(case: Case, references: list[Reference], execution: Execution, model_id: str, *,
-          policy: Policy, judge: JudgeProvider, root: Path) -> dict:
+          policy: Policy, judge: JudgeProvider, root: Path, reviewer=None) -> dict:
     """One model's answer to one clip: validity, clip score against every reference and reward."""
     if (execution.checkpoint_hash != model_id or execution.runtime_hash != policy.runtime_hash
             or execution.preprocessing_hash != policy.preprocessing_hash or execution.clip_sha256 != case.task.clip_sha256):
@@ -56,10 +56,15 @@ def grade(case: Case, references: list[Reference], execution: Execution, model_i
     graded, response = _grade(execution, model_id, case, policy)
     if not graded["valid"]:
         return {**graded, "video": case.source_group, "response": execution.raw, "latency_s": execution.elapsed_s}
-    measured, _ = judge_clip(references, response, judge=judge, policy=policy, root=root)
+    measured, assessments = judge_clip(references, response, judge=judge, policy=policy, root=root)
+    if reviewer is not None and policy.scoring_version == 'events-v2':
+        from .reward import combine
+        repaired, receipt = reviewer.review(case, response, assessments, root)
+        measured = {**combine(references, response, assessments, policy, reviews=repaired), 'review': receipt}
     return {**graded, "video": case.source_group, "score": measured,
             "response": response.model_dump(), "latency_s": execution.elapsed_s,
-            **reward(measured["quality"], execution.elapsed_s, case.task.duration, policy, valid=True)}
+            **reward(measured["quality"], execution.elapsed_s, case.task.duration, policy, valid=True,
+                     spec=EVAL if policy.scoring_version == "events-v2" else EVAL.model_copy(update={"clip_weight":.8,"time_weight":.2}))}
 
 
 def decide(receipts: list[dict], king: str | None, challenger: str, policy: Policy) -> dict:

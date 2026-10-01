@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+import threading
 import uuid
 
 import httpx
@@ -35,6 +36,9 @@ IMAGE_TOKENS = 4096  # upper bound per high-detail image
 
 
 class ApiText:
+    _slots = threading.BoundedSemaphore(4)
+    _requests = [threading.RLock() for _ in range(64)]
+
     def __init__(self, model: str, cache: Path, *, provider: str = "openai", effort: str = "low",
                  max_tokens: int = 2048, budget_path: str | None = None, cache_only: bool = False,
                  daily_limit_usd: float | None = 9.):
@@ -66,6 +70,26 @@ class ApiText:
             db.execute("UPDATE calls SET cost=?, record=? WHERE id=?", (cost, json.dumps(record), call_id))
 
     def __call__(self, prompt: str, value: dict, *, schema: dict, images: list[bytes] = ()) -> dict:
+        # Single flight for identical requests, including across adapter instances.
+        # Cache keys and durable reservations remain authoritative after restart.
+        import hashlib
+        key = content_hash({'cache': str(self.cache.resolve()), 'identity': self.identity,
+                            'prompt': prompt, 'value': value, 'schema': schema,
+                            'images': [hashlib.sha256(i).hexdigest() for i in images]})
+        lock = self._requests[int(key[:8], 16) % len(self._requests)]
+        if not lock.acquire(timeout=max(0., self.request_timeout_s())):
+            raise TimeoutError('api_queue_deadline_expired')
+        try:
+            if not self._slots.acquire(timeout=max(0., self.request_timeout_s())):
+                raise TimeoutError('api_queue_deadline_expired')
+            try:
+                return self._call(prompt, value, schema=schema, images=images)
+            finally:
+                self._slots.release()
+        finally:
+            lock.release()
+
+    def _call(self, prompt: str, value: dict, *, schema: dict, images: list[bytes] = ()) -> dict:
         """``images`` are JPEG bytes sent at high detail after the JSON value."""
         text = canonical_bytes(value).decode()
         content = [{"type": "input_text", "text": text}] + [

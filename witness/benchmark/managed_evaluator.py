@@ -9,7 +9,7 @@ from pathlib import Path
 
 from witness.storage import write_private
 from .compression import CompressionRequired
-from .evaluator import Evaluator
+from .evaluator import Evaluator, ModelRejected
 from .protocol import Result, RESUME_WINDOW
 from .triggers import Triggers
 
@@ -22,11 +22,20 @@ class MinerUnavailable(RuntimeError):
     """Miner transport failed; withdraw locally without publishing a result."""
 
 
+class MinerInvalidPackage(RuntimeError):
+    """Challenger package failed validation; require an explicit resubmission."""
+
+
 ROUND_ACTIVE_BUDGET_S = 45 * 60
+MAX_TIMEOUT_FAILURES = 2  # Initial attempt plus one retry, across windows/restarts.
 
 
 class EvaluationRoundBudgetExceeded(RuntimeError):
     """Bound local retry work without blaming a miner for infrastructure delays."""
+
+
+class InfrastructureRoundBudgetExceeded(RuntimeError):
+    """Park validator-side failures until the next window without withdrawing a miner."""
 
 
 class ScheduledTriggers(Triggers):
@@ -40,6 +49,8 @@ class ScheduledTriggers(Triggers):
         for name in ('removed_block', 'readmission_block'):
             if name not in columns:
                 self.db.execute(f'ALTER TABLE triggers ADD COLUMN {name} INTEGER')
+        if 'timeout_failures' not in columns:
+            self.db.execute('ALTER TABLE triggers ADD COLUMN timeout_failures INTEGER NOT NULL DEFAULT 0')
         self.db.execute('CREATE TABLE IF NOT EXISTS queue_cursor (id INTEGER PRIMARY KEY, block INTEGER)')
 
     def observe(self, commitments, registered, *args, **kwargs):
@@ -55,27 +66,13 @@ class ScheduledTriggers(Triggers):
                 if fresh:
                     block = min(r['block'] for r in fresh)
                     self.db.execute("UPDATE triggers SET status='queued',reason='resubmitted',"
-                                    "readmission_block=?,retry_block=0 WHERE id=?", (block, old['id']))
-            excluded = {r['hotkey'] for r in self.excluded()}
+                                    "readmission_block=?,retry_block=0,timeout_failures=0 WHERE id=?", (block, old['id']))
             # Keep the immutable first binding, including withdrawn records.
             blocked = {r['hotkey'] for r in withdrawn}
-            return super().observe(rows, set(registered) - excluded - blocked, *args, **kwargs)
+            return super().observe(rows, set(registered) - blocked, *args, **kwargs)
 
     def rows(self):
         return [row for row in super().rows() if row['status'] not in ('excluded', 'withdrawn')]
-
-    def excluded(self):
-        with self.lock:
-            return [self._decode(r) for r in self.db.execute(
-                "SELECT * FROM triggers WHERE status='excluded' ORDER BY retry_block,block,hotkey")]
-
-    def compression_retry(self, trigger_id, *, ready, block):
-        with self.lock:
-            self.db.execute("UPDATE triggers SET status=?,reason=?,retry_block=? "
-                            "WHERE id=? AND status='excluded'", (
-                                'queued' if ready else 'excluded',
-                                'compression_ready' if ready else 'compression_required',
-                                0 if ready else block + 25, trigger_id))
 
     def reconcile(self, hotkey, result, *, window, rejected=False):
         # Only the finalized ledger can turn an excluded entry into a used one.
@@ -88,6 +85,12 @@ class ScheduledTriggers(Triggers):
         # One immediate retry after restart for legacy timeout/cancellation rows.
         # Preserve attempt counts, coldkey turns, immutable bindings and results.
         with self.lock:
+            # Migrate previously parked/excluded transport failures. An old
+            # finalized commitment must never silently restore eligibility.
+            for row in self.db.execute("SELECT id,status FROM triggers WHERE status='excluded' "
+                                       "OR (status IN ('queued','failed') AND reason='DownloadBudgetExceeded')").fetchall():
+                self.withdraw(row['id'], 'compression_required' if row['status'] == 'excluded'
+                              else 'download_time_limit')
             rows = [dict(r) for r in self.db.execute(
                 "SELECT id,retry_block,reason FROM triggers WHERE status='queued' AND retry_block>0 "
                 "AND reason IN ('TimeoutError','InterruptedError')")]
@@ -98,9 +101,9 @@ class ScheduledTriggers(Triggers):
                 cap = self.current_block() + 5
                 rows.extend(dict(r) for r in self.db.execute(
                     "SELECT id,retry_block,reason FROM triggers WHERE status='queued' AND retry_block>? "
-                    "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded')", (cap,)))
+                    "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded','InfrastructureRoundBudgetExceeded')", (cap,)))
                 self.db.execute("UPDATE triggers SET retry_block=? WHERE status='queued' AND retry_block>? "
-                                "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded')", (cap, cap))
+                                "AND COALESCE(reason,'') NOT IN ('DownloadBudgetExceeded','EvaluationRoundBudgetExceeded','InfrastructureRoundBudgetExceeded')", (cap, cap))
             return rows
 
     def pending(self, count=1, *, before_block=2**63-1, current_block=2**63-1):
@@ -111,14 +114,18 @@ class ScheduledTriggers(Triggers):
                 ORDER BY c.turn,COALESCE(t.readmission_block,t.block),t.hotkey''', (before_block,)).fetchall()
         groups = {}
         for row in rows:
-            if row['reason'] == 'EvaluationRoundBudgetExceeded':
+            if row['timeout_failures'] >= MAX_TIMEOUT_FAILURES:
+                self.withdraw(row['id'])
+                continue
+            if row['reason'] in ('EvaluationRoundBudgetExceeded', 'InfrastructureRoundBudgetExceeded'):
                 if self.interruption(row['window_id']) != 'window_changed':
                     continue  # Restart cannot grant more time in the same window.
                 with self.lock:
                     self.db.execute("UPDATE triggers SET retry_block=0,reason='new_window' WHERE id=?", (row['id'],))
                 row = dict(row, retry_block=0, reason='new_window')
             if row['reason'] == 'DownloadBudgetExceeded':
-                continue  # Parked acquisition does not block an eligible sibling.
+                self.withdraw(row['id'], 'download_time_limit')
+                continue
             candidate = candidates.get(row['model_id'])
             if candidate and candidate['hotkey'] == row['hotkey']:
                 groups.setdefault(row['coldkey'], []).append(self._decode(row))
@@ -134,23 +141,48 @@ class ScheduledTriggers(Triggers):
                     break
         return result
 
+    def withdraw(self, trigger_id, reason='retry_limit_exceeded'):
+        """Remove dispatch eligibility; preserve binding/history without hotkey use."""
+        with self.lock:
+            self.db.execute("UPDATE triggers SET status='withdrawn',reason=?,"
+                            "removed_block=MAX(?,block,COALESCE(readmission_block,block)),"
+                            "retry_block=0 WHERE id=? AND status IN ('queued','running','failed','excluded')",
+                            (reason, self.current_block() if self.current_block else 0, trigger_id))
+
     def defer(self, trigger_id, reason, retry_block=0):
-        if reason in ('MinerUnavailable', 'MinerDownloadExpired'):
-            with self.lock:
-                row = self.db.execute('SELECT window_id FROM triggers WHERE id=?', (trigger_id,)).fetchone()
-                if row and not self.interruption(row['window_id']):
-                    self.db.execute("UPDATE triggers SET status='withdrawn',reason=?,"
-                                    "removed_block=?,retry_block=0 WHERE id=? AND status='running'",
-                                    ('download_time_limit' if reason == 'MinerDownloadExpired' else 'miner_unavailable',
-                                     self.current_block() if self.current_block else 0, trigger_id))
-                    return
-        if reason == 'CompressionRequired':
-            with self.lock:
-                self.db.execute("UPDATE triggers SET status='excluded',reason='compression_required',"
-                                "retry_block=? WHERE id=? AND status='running'",
-                                ((self.current_block() if self.current_block else 0) + 25, trigger_id))
-            return
-        if reason in ('DownloadBudgetExceeded', 'EvaluationRoundBudgetExceeded'):
+        failures = {'MinerUnavailable': 'miner_unavailable',
+                    'MinerDownloadExpired': 'download_time_limit',
+                    'DownloadBudgetExceeded': 'download_time_limit',
+                    'CompressionRequired': 'compression_required',
+                    'MinerInvalidPackage': 'invalid_model_package'}
+        with self.lock:
+            row = self.db.execute('SELECT window_id,status FROM triggers WHERE id=?', (trigger_id,)).fetchone()
+            planned = self.interruption(row['window_id']) if row else None
+            # Shutdown/window rotation is not a failed attempt. Deadline expiry is.
+            if planned and planned != 'attempt_budget_elapsed':
+                return super().defer(trigger_id, planned, 0)
+            if reason in failures:
+                if row and row['status'] == 'running':
+                    self.withdraw(trigger_id, failures[reason])
+                return
+            if reason in ('InfrastructureError', 'TimeoutError'):
+                # Miner socket timeouts are already attributed by _miner_io.
+                # An unclassified timeout here can be judge/king/host failure.
+                return super().defer(trigger_id, planned or reason, 0 if planned else
+                                     (min(retry_block, self.current_block() + 5)
+                                      if self.current_block else retry_block))
+            if reason == 'InfrastructureRoundBudgetExceeded':
+                return super().defer(trigger_id, reason, 2**63 - 1)
+            if row and row['status'] == 'running' and (reason in (
+                    'EvaluationRoundBudgetExceeded', 'attempt_budget_elapsed')
+                    or planned == 'attempt_budget_elapsed'):
+                self.db.execute('UPDATE triggers SET timeout_failures=timeout_failures+1 WHERE id=?',
+                                (trigger_id,))
+                timeout_failures = self.db.execute('SELECT timeout_failures FROM triggers WHERE id=?',
+                                                   (trigger_id,)).fetchone()[0]
+                if timeout_failures >= MAX_TIMEOUT_FAILURES:
+                    return self.withdraw(trigger_id)
+        if reason == 'EvaluationRoundBudgetExceeded':
             # Durable local parking only; no terminal result or hotkey use.
             return super().defer(trigger_id, reason, 2**63 - 1)
         with self.lock:
@@ -260,6 +292,8 @@ class ManagedEvaluator(Evaluator):
         try:
             return callback()
         except Exception as error:
+            if isinstance(error, ModelRejected) and not self._cancelled(window):
+                raise MinerInvalidPackage('invalid_model_package') from error
             if isinstance(error, DownloadBudgetExceeded) and not self._cancelled(window):
                 raise MinerDownloadExpired('download_time_limit') from error
             remote = not isinstance(error, (CompressionRequired, DownloadBudgetExceeded)) and (
@@ -278,7 +312,13 @@ class ManagedEvaluator(Evaluator):
         # Attribute only challenger download failures, never king/judge/GPU failures.
         def guarded(*args):
             if window['king'] and entry['model_id'] == window['king']['model_id']:
-                return original(*args)
+                from .contract import InfrastructureError
+                try:
+                    return original(*args)
+                except (InfrastructureError, InterruptedError):
+                    raise
+                except Exception as error:
+                    raise InfrastructureError('king_model_acquisition_failed') from error
             def acquire():
                 current = self.prefetch
                 if current and current.entry['model_id'] == entry['model_id']:
@@ -315,22 +355,6 @@ class ManagedEvaluator(Evaluator):
         self._miner_io(lambda: self.compression_check(
             entry, snapshot, lambda: self._cancelled(window), 30.), window, preflight=True)
         return super()._attempt(entry, window, snapshot, partials)
-
-    def _recover_compression(self, window, snapshot):
-        if self.compression_check is None:
-            return
-        rows = self.triggers.excluded()
-        if not rows or rows[0]['retry_block'] > snapshot['block']:
-            return
-        row = rows[0]  # At most one five-second check per worker pass.
-        ready = False
-        try:
-            self.compression_check(row, snapshot,
-                lambda: self.stopping.is_set() or (self.ledger.active or {}).get('id') != window['id'], 5.)
-            ready = True
-        except Exception:
-            pass  # Still excluded; no score, result commitment or hotkey consumption.
-        self.triggers.compression_retry(row['id'], ready=ready, block=snapshot['block'])
 
     def _interruption(self, window):
         with self.lock:
@@ -406,7 +430,6 @@ class ManagedEvaluator(Evaluator):
         if window['id'] in self.hold_windows:
             self.progress('waiting', window)
             return  # Chain replay/dashboard/weights continue; no new scores for this window.
-        self._recover_compression(window, snapshot)
         self._cleanup_models(window)
         return super().run_once(window, snapshot)
 
@@ -488,6 +511,7 @@ class ManagedEvaluator(Evaluator):
 
     def _attempt(self, entry, window, snapshot, partials):
         from .performance import Performance
+        from .contract import InfrastructureError
         meter=Performance(self.root,entry,window)
         self.performance=meter
         original_download, original_runner, original_batch, original_judge = (
@@ -496,7 +520,12 @@ class ManagedEvaluator(Evaluator):
             def __getattr__(self,name): return getattr(original_judge,name)
             def assess(self,*args,**kwargs):
                 with meter.phase('judge_provider'):
-                    return original_judge.assess(*args,**kwargs)
+                    try:
+                        return original_judge.assess(*args,**kwargs)
+                    except InfrastructureError:
+                        raise
+                    except Exception as error:
+                        raise InfrastructureError('judge_assessment_failed') from error
         def download(*args,**kwargs):
             cached=(self.root/'models'/args[0]['model_id']/'witness-manifest.json').exists()
             with meter.phase('cache_validation' if cached else 'download_or_prefetch_wait'):
@@ -506,6 +535,23 @@ class ManagedEvaluator(Evaluator):
             class MeasuredRunner:
                 def __getattr__(self,name): return getattr(delegate,name)
                 def __setattr__(self,name,value): setattr(delegate,name,value)
+                def stream(self,models,tasks,paths,**kwargs):
+                    began=time.monotonic()
+                    fresh=0.
+                    callback=kwargs.pop('on_execution')
+                    def completed(value):
+                        nonlocal fresh
+                        reused=(value.model_id,value.task_id) in delegate.reused_task_ids
+                        if not reused: fresh+=value.elapsed_s
+                        meter.clips.append({'model_id':value.model_id,'task_id':value.task_id,
+                                            'elapsed_s':value.elapsed_s,'status':value.status,'reused':reused})
+                        callback(value)
+                    with meter.phase('gpu_session_wall'):
+                        result=delegate.stream(models,tasks,paths,on_execution=completed,**kwargs)
+                    wall=time.monotonic()-began
+                    meter.models.append({'models':models,'gpu_call_s':wall,'fresh_inference_s':fresh,
+                                         'non_inference_session_s':max(0.,wall-fresh)})
+                    return result
                 def __call__(self,models,tasks,paths):
                     began=time.monotonic()
                     with meter.phase('gpu_setup_transfer_load_warmup_inference'):
@@ -533,6 +579,9 @@ class ManagedEvaluator(Evaluator):
             previous=json.loads(path.read_text()) if path.exists() else {}
             remaining=ROUND_ACTIVE_BUDGET_S-previous.get('active_s',0.)
             if remaining <= 0:
+                if previous.get('latest', {}).get('error_type') in (
+                        'InfrastructureError', 'InfrastructureRoundBudgetExceeded', 'TimeoutError'):
+                    raise InfrastructureRoundBudgetExceeded('validator_round_time_limit')
                 raise EvaluationRoundBudgetExceeded('round_active_time_limit')
             bound=time.monotonic()+remaining
             if self.deadline is None or bound < self.deadline:
@@ -540,6 +589,12 @@ class ManagedEvaluator(Evaluator):
                 capped=True
             return self._attempt_checked(entry,window,snapshot,partials)
         except Exception as exc:
+            if isinstance(exc, (InfrastructureError, TimeoutError)):
+                if self._interruption(window['id']) == 'attempt_budget_elapsed':
+                    error=InfrastructureRoundBudgetExceeded('validator_round_time_limit')
+                    raise error from exc
+                error=exc
+                raise
             if (capped and self._interruption(window['id']) == 'attempt_budget_elapsed'):
                 error=EvaluationRoundBudgetExceeded('round_active_time_limit')
                 raise error from exc
