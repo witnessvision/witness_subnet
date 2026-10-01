@@ -27,6 +27,7 @@ TIMED_OUT = 124  # exit status of coreutils ``timeout``
 def runtime_identity(config: dict) -> dict:
     """What decides a model's answers and timing: validator runtime files, image and GPU."""
     return {"runtime": (HERE / "pod_runtime.py").read_text(), "setup": (HERE / "pod_setup.sh").read_text(),
+            "fp8": (HERE / "pod_fp8.py").read_text(),
             "audio": (HERE / "pod_audio.py").read_text(),
             "environments": {path.name: path.read_text() for path in sorted((HERE / "pod_env").glob("*.txt"))},
             "backend": config.get("backend", "runpod"), "image": config.get("image", DEFAULT_IMAGE),
@@ -41,7 +42,7 @@ def prepare(gpu: Gpu, job: str) -> str:
     if gpu.run(["mkdir", "-p", remote + "/clips", workspace + "/pod_env"], timeout=60).returncode:
         raise InfrastructureError("gpu_command_failed")
     gpu.put(sorted((HERE / "pod_env").glob("*.txt")), f"{workspace}/pod_env/")
-    gpu.put([HERE / "pod_runtime.py", HERE / "pod_audio.py"], f"{workspace}/")
+    gpu.put([HERE / "pod_runtime.py", HERE / "pod_audio.py", HERE / "pod_fp8.py"], f"{workspace}/")
     if gpu.run(["bash", "-s"], timeout=3600, stdin=(HERE / "pod_setup.sh").read_text()).returncode:
         raise InfrastructureError("gpu_setup_failed")
     return remote
@@ -173,9 +174,11 @@ class PodRunner:
         self.on_execution = None
         self.pause_after = None
         self.continue_batch = None
+        self.native_fp8 = False
 
     def _binding(self, model_id, task):
         return content_hash({'model_id': model_id, 'task': task.model_dump(),
+                             **({'native_fp8': True} if self.native_fp8 else {}),
                              'policy': self.policy.model_dump(), 'max_new_tokens': MAX_NEW_TOKENS,
                              'manifest': self.submissions[model_id]['manifest']})
 
@@ -274,6 +277,7 @@ class PodRunner:
             tasks = [task for task in requested_tasks if task.id not in saved[model_id]]
             task_paths = {task.id: path for task, path in zip(requested_tasks, paths)}
             spec = {"arch": manifest["arch"], "weights": weights,
+                    "native_fp8": self.native_fp8,
                     "max_new_tokens": MAX_NEW_TOKENS, "load_timeout_s": 120,
                     "tasks": [{"task_id": task.id, "path": f"{remote}/clips/{path.name}", "prompt": prompt(task.duration),
                                "deadline_s": self.policy.deadline_s(task.duration)}

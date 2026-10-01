@@ -85,3 +85,35 @@ def test_only_reviewed_reset_release_can_evaluate_pre_activation(tmp_path):
     assert not ledger.evaluation_compatible(32)
     with pytest.raises(ValueError, match='invalid_admission_reset_upgrade'):
         validate_upgrade({**upgrade,'previous_policy':'d'*64}, policy_identity())
+
+
+def test_explicit_replacement_only_changes_unopened_schedule(tmp_path):
+    from witness.benchmark.ledger import PRE_RESET_POLICY
+    path=tmp_path/'ledger.db';pending='c'*64
+    prior={'first_window':30,'previous_policy':'e'*64}
+    old={'first_window':32,'previous_policy':PRE_RESET_POLICY,'prior_upgrade':prior,'admission_reset':32}
+    ledger=Ledger(path,activation_block=1,activation_epoch=0,policy=pending,policy_upgrade=old)
+    ledger.db.execute('INSERT INTO windows VALUES (?,?,NULL)',(30,'preserved'));ledger.close()
+    new={**old,'first_window':31}
+    with pytest.raises(ValueError,match='schedule_changed'):
+        Ledger(path,activation_block=1,activation_epoch=0,policy=policy_identity(),policy_upgrade=new)
+    ledger=Ledger(path,activation_block=1,activation_epoch=0,policy=policy_identity(),policy_upgrade=new,
+                  replace_pending_policy=pending)
+    assert ledger.db.execute('SELECT opening FROM windows WHERE id=30').fetchone()[0]=='preserved'
+    assert ledger.get('pending_policy_replacement')['from']==pending
+    assert ledger.policy_for_window(30)==PRE_RESET_POLICY
+    assert ledger.policy_for_window(31)==policy_identity()
+    ledger.close()
+    Ledger(path,activation_block=1,activation_epoch=0,policy=policy_identity(),policy_upgrade=new,
+           replace_pending_policy=pending).close()
+
+
+def test_pending_replacement_rejects_opened_boundary(tmp_path):
+    from witness.benchmark.ledger import PRE_RESET_POLICY
+    path=tmp_path/'ledger.db';pending='c'*64
+    old={'first_window':32,'previous_policy':PRE_RESET_POLICY,'admission_reset':32}
+    ledger=Ledger(path,activation_block=1,activation_epoch=0,policy=pending,policy_upgrade=old)
+    ledger.db.execute('INSERT INTO windows VALUES (?,?,NULL)',(31,'already_open'));ledger.close()
+    with pytest.raises(ValueError,match='requires_unopened_window'):
+        Ledger(path,activation_block=1,activation_epoch=0,policy=policy_identity(),
+               policy_upgrade={**old,'first_window':31},replace_pending_policy=pending)

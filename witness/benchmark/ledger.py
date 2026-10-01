@@ -26,7 +26,7 @@ def validate_upgrade(upgrade, policy):
         raise ValueError('invalid_policy_upgrade_schedule')
     if 'admission_reset' in upgrade and (
             upgrade['admission_reset'] != HOTKEY_RESET_WINDOW or
-            upgrade['first_window'] != HOTKEY_RESET_WINDOW or
+            upgrade['first_window'] not in (31, HOTKEY_RESET_WINDOW) or
             upgrade['previous_policy'] != PRE_RESET_POLICY):
         raise ValueError('invalid_admission_reset_upgrade')
     if 'prior_upgrade' in upgrade:
@@ -37,7 +37,8 @@ def validate_upgrade(upgrade, policy):
 
 
 class Ledger:
-    def __init__(self, path: Path, *, activation_block: int, activation_epoch: int, policy: str, policy_upgrade: dict | None = None):
+    def __init__(self, path: Path, *, activation_block: int, activation_epoch: int, policy: str,
+                 policy_upgrade: dict | None = None, replace_pending_policy: str | None = None):
         if activation_block < 1 or activation_epoch < 0:
             raise ValueError('explicit_activation_block_and_epoch_required')
         self.activation_block, self.activation_epoch, self.policy = activation_block, activation_epoch, policy
@@ -66,12 +67,22 @@ class Ledger:
         self.versioned_media = policy == policy_identity()
         previous = self.get('activation')
         saved_upgrade = self.get('policy_upgrade')
+        replacing = bool(replace_pending_policy and previous and saved_upgrade and policy_upgrade
+                         and previous['policy'] == replace_pending_policy and previous != expected)
+        if replacing:
+            if (previous['block'] != activation_block or previous['epoch'] != activation_epoch or
+                    saved_upgrade['previous_policy'] != policy_upgrade['previous_policy'] or
+                    saved_upgrade.get('prior_upgrade') != policy_upgrade.get('prior_upgrade')):
+                raise ValueError('pending_policy_replacement_changes_history')
+            boundary = min(saved_upgrade['first_window'], policy_upgrade['first_window'])
+            if self.db.execute('SELECT 1 FROM windows WHERE id>=? LIMIT 1', (boundary,)).fetchone():
+                raise ValueError('pending_policy_replacement_requires_unopened_window')
         extending = (policy_upgrade is not None and saved_upgrade is not None
                      and policy_upgrade.get('prior_upgrade') == saved_upgrade)
-        if saved_upgrade is not None and saved_upgrade != policy_upgrade and not extending:
+        if saved_upgrade is not None and saved_upgrade != policy_upgrade and not (extending or replacing):
             raise ValueError('policy_upgrade_schedule_changed')
-        if policy_upgrade is not None and (saved_upgrade is None or extending):
-            if previous is not None and previous != {**expected,'policy':policy_upgrade['previous_policy']}:
+        if policy_upgrade is not None and (saved_upgrade is None or extending or replacing):
+            if previous is not None and previous != {**expected,'policy':policy_upgrade['previous_policy']} and not replacing:
                 raise ValueError('policy_upgrade_source_mismatch')
             first = policy_upgrade['first_window']
             if self.db.execute('SELECT 1 FROM windows WHERE id>=? LIMIT 1',(first,)).fetchone():
@@ -81,6 +92,10 @@ class Ledger:
             with self.lock:
                 self.db.execute('BEGIN IMMEDIATE')
                 try:
+                    if replacing:
+                        self.set('pending_policy_replacement', {'from': previous['policy'], 'to': policy,
+                                 'old_schedule': saved_upgrade, 'new_schedule': policy_upgrade,
+                                 'cursor': self.cursor})
                     self.set('policy_upgrade',policy_upgrade)
                     self.set('activation',expected)
                     self.db.execute('COMMIT')
@@ -128,9 +143,9 @@ class Ledger:
         self.set('hotkey_reset', {'window': HOTKEY_RESET_WINDOW, 'block': snapshot['block']})
 
     def evaluation_compatible(self, window):
-        # This specific release changes admission bookkeeping only. Its scoring,
-        # media, model runtime and timing rules are identical to PRE_RESET_POLICY.
-        # Later scoring upgrades cannot reuse this exception with a new predecessor.
+        # Before activation, this release retains the predecessor's scoring and
+        # legacy FP8 execution path. Later upgrades cannot reuse this exception
+        # with a different predecessor.
         return bool(self.policy_upgrade and
                     self.policy_upgrade.get('admission_reset') == HOTKEY_RESET_WINDOW and
                     self.policy_for_window(window) == PRE_RESET_POLICY)

@@ -25,7 +25,7 @@ MODELS = WORKSPACE / "models"
 SALMONN_REPO = WORKSPACE / "video-SALMONN-2/video_SALMONN2_pro"
 
 
-def salmonn(weights: Path, max_new_tokens: int):
+def salmonn(weights: Path, max_new_tokens: int, *, native_fp8=False):
     sys.path[:0] = [str(SALMONN_REPO), str(SALMONN_REPO / "scripts")]
     from transformers import AutoTokenizer
     from qwenvl.data.processing_qwen3_vl import Qwen3VLProcessor
@@ -42,6 +42,9 @@ def salmonn(weights: Path, max_new_tokens: int):
     model = Qwen3VLForConditionalGeneration.from_pretrained(weights, attn_implementation="sdpa",
                                                             torch_dtype=torch.bfloat16,
                                                             use_safetensors=True, local_files_only=True, trust_remote_code=False).cuda().eval()
+    if native_fp8:
+        from pod_fp8 import install_native_fp8
+        model = install_native_fp8(model)
 
     def infer(path, prompt):
         inputs = reference.prepare_inputs(dataset, path, prompt, True, torch.device("cuda"))
@@ -117,7 +120,8 @@ def _worker(job, pipe):
         pipe.send({"error": "invalid_model_directory", "exit": 2})
         return
     try:
-        infer = LOADERS[job["arch"]](weights, job["max_new_tokens"])
+        options = {'native_fp8': True} if job.get('native_fp8') and job['arch'] == 'salmonn2-pro' else {}
+        infer = LOADERS[job["arch"]](weights, job["max_new_tokens"], **options)
     except ImportError:
         pipe.send({"error": "runtime_import_failed", "exit": 3})
         return

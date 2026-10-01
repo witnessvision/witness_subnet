@@ -15,12 +15,12 @@ Validators following the current SN20 mainnet protocol use:
 
 Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
 ledger directory when starting a new follower. Current CLI invocations also
-require the window-32 admission reset schedule shown in [Validator setup](validator.md).
-The events-v2 policy for windows 30–31 remains
+require the window-31 runtime / window-32 admission schedule shown in [Validator setup](validator.md).
+The events-v2 policy for window 30 remains
 `4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1`.
 Pass it as `--previous-policy`, retain the original window-30 schedule in
-`--prior-policy-upgrade`, and use `--eval-upgrade-window 32 --hotkey-reset-upgrade`.
-Install this release before window 32 opens; already-opened windows cannot be migrated.
+`--prior-policy-upgrade`, and use `--eval-upgrade-window 31 --hotkey-reset-upgrade`.
+Install this release before window 31 opens; already-opened windows cannot be migrated.
 
 At window 32, every hotkey gets one new admission opportunity. The existing king,
 closed decisions, commitments, and archived admissions/results remain intact.
@@ -29,8 +29,9 @@ must publish a fresh commitment at or after the first finalized block of window 
 old commitments do not automatically re-enter. As usual, a submission can only be
 evaluated in a later window whose queue was locked after that commitment.
 This is a **one-time reset**, not unlimited hotkey reuse. All validators/followers
-must use the same release and activation schedule. Scoring is unchanged, so
-this reset-only upgrade continues evaluations under the original policy until activation.
+must use the same release and activation schedule. The scoring formula is unchanged;
+the runtime retains its original FP8 path until window 31. The admission reset
+still occurs only at window 32.
 
 These are shared protocol coordinates, not a certificate that
 all real acceptance checks below have completed. The allocation is 100% burn
@@ -115,3 +116,33 @@ code against a newer ledger. Never erase consumed hotkeys or pending submissions
 to recover availability. An ambiguous signed transaction must be reconciled from
 chain receipts/storage before retry. Keep dashboard failures independent of the
 consensus service.
+
+### Native FP8 runtime
+
+From window 31, SALMONN W8A8 compressed-tensors linears with symmetric per-tensor
+FP8 E4M3 weights and dynamic per-tensor FP8 inputs use validator-owned GPU kernels.
+Large prefill batches use CUDA scaled matrix multiplication; single-token decode
+uses a fused vector kernel. BF16 modules, unaligned shapes and other quantization
+schemes retain their previous path. This does not assert Omni FP4 support.
+Quantizing every layer is not necessarily faster: miners should measure their
+checkpoint, particularly small attention projections. Model loading/compilation
+remains bounded; the per-clip deadline remains 60 seconds.
+
+Operators who already staged the superseded reset-only release can explicitly
+replace its **unopened** schedule by adding
+`--replace-pending-policy 5a464a4591b76f478fa41a704f7eb1eeed836c31db96a28d949b8b1779c89b72`.
+This preserves historical policy coordinates and refuses any affected opened
+window. Fresh followers do not need this replacement flag.
+
+For a `noexec` inference sandbox, build Triton's CPU launchers **without any miner
+model, media or credentials mounted**, using the pinned SALMONN Python environment:
+
+```bash
+envs/salmonn/bin/python witness/benchmark/pod_fp8.py --prepare-extensions native_triton
+```
+
+This provisioning step needs a GPU and an executable temporary build directory.
+Copy the resulting `native_triton/` directory beside `pod_fp8.py` in the pinned
+worker image, owned by root and read-only. The inference worker then links its
+cache entries to these trusted image files; `/tmp` stays `noexec`. GPU kernels
+still compile into the temporary cache. Do not accept extension bundles from miners.

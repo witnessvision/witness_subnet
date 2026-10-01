@@ -140,7 +140,7 @@ def policy_identity() -> str:
     files = ("reward.py", "scoring.py", "contract.py", "adjudication.py", "judge.py", "annotate.py",
              "media.py", "pod_runtime.py", "pod_audio.py", "pod_setup.sh", "protocol.py", "ledger.py",
              "submission.py", "triggers.py", "evaluator.py", "pool.py", "duel.py", "runner.py", "stopping.py",
-             "execution.py", "event_scoring.py", "novel_review.py")
+             "execution.py", "event_scoring.py", "novel_review.py", "pod_fp8.py")
     catalog = here / "data" / "catalogue-v2.json"
     hashes = {name: hashlib.sha256((here / name).read_bytes()).hexdigest() for name in files}
     hashes.update({str(p.relative_to(here)): hashlib.sha256(p.read_bytes()).hexdigest()

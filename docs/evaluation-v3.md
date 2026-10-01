@@ -56,8 +56,9 @@ provider calls must not be added together to claim duel duration.
    existing weights, but does not evaluate windows before N. The ledger refuses
    an upgrade that changes already-opened windows or rewrites a stored upgrade schedule.
    Later upgrades retain the earlier schedule via `--prior-policy-upgrade`. The
-   explicitly versioned window-32 admission reset is scoring-compatible with
-   windows 30–31, so `--hotkey-reset-upgrade` continues their evaluations.
+   window-31 native-FP8 / window-32 admission release keeps the original
+   scoring and FP8 execution path before activation, so `--hotkey-reset-upgrade`
+   continues window-30 evaluations.
 5. Verify the first new baseline and duel: matching policy, terminal commitment,
    finalized consensus/weights, API health and phase timing. Keep queue freezing,
    strict miner retries, compression, authentication and sandbox controls.

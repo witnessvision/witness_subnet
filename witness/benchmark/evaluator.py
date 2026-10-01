@@ -250,6 +250,8 @@ class Evaluator:
         attempt = json.loads(attempts.read_text())['count'] + 1 if attempts.exists() else 1
         write_private(attempts, {'count': attempt})
         run = self.runner({model_id: item}, f'w{window["id"]}-{model_id[:16]}-{attempt}')
+        from .ledger import PRE_RESET_POLICY
+        run.native_fp8 = window['id'] >= 31 and self.ledger.policy_for_window(window['id']) != PRE_RESET_POLICY
         if window['id'] >= RESUME_WINDOW:
             run.execution_cache = root / 'models' / model_id / 'executions'
         run.cancelled = lambda: self._cancelled(window)

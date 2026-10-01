@@ -234,6 +234,8 @@ def main():
                         help='Previous upgrade schedule as JSON; preserves historical replay')
     parser.add_argument('--hotkey-reset-upgrade', action='store_true',
                         help='Activate the one-time admission reset at window 32')
+    parser.add_argument('--replace-pending-policy',
+                        help='Exact superseded policy hash; only wholly unopened schedules may be replaced')
     parser.add_argument('--root', type=Path, default=Path.home() / '.witness' / 'validator-v2')
     parser.add_argument('--wallet-name', default='default')
     parser.add_argument('--wallet-hotkey', default='default')
@@ -275,6 +277,7 @@ def main():
     chain, writer_chain = Chain(args.network, args.netuid), None
     ledger = Ledger(root / 'chain.sqlite3', activation_block=args.activation_block,
                     activation_epoch=args.activation_epoch, policy=policy_identity(),
+                    replace_pending_policy=args.replace_pending_policy,
                     policy_upgrade=({'first_window':args.eval_upgrade_window,'previous_policy':args.previous_policy,
                                      **({'admission_reset':32} if args.hotkey_reset_upgrade else {}),
                                      **({'prior_upgrade':args.prior_policy_upgrade} if args.prior_policy_upgrade else {})}

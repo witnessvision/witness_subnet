@@ -18,14 +18,15 @@ actual chain change, so inspect applied weights, not only the intended vector.
 All operators must agree on **release/policy hash, activation block and actual
 subnet epoch at that block**. These values are mandatory; no production
 checkpoint is silently selected. The scoring transition is also mandatory for
-fresh followers: window 30 uses events-v2 and earlier windows keep their previous
-policies. See [the release schedule](launch.md). Use a historical-state-capable
+fresh followers: window 30 uses events-v2, window 31 enables qualified SALMONN W8A8
+FP8 kernels, and window 32 resets admissions once. Earlier windows retain their
+original policies. See [the release schedule](launch.md). Use a historical-state-capable
 chain endpoint.
 
 ```bash
 .venv/bin/witness-validator --hotkey PUBLIC_SS58 \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 32 \
+  --eval-upgrade-window 31 \
   --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
   --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
   --hotkey-reset-upgrade \
@@ -116,7 +117,7 @@ compute cap is additional; storage, network and provider settlement can add cost
 ```bash
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 32 \
+  --eval-upgrade-window 31 \
   --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
   --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
   --hotkey-reset-upgrade \
@@ -140,7 +141,7 @@ pinned base dependencies. Prepare the GPU environments once, before activation:
 .venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 32 \
+  --eval-upgrade-window 31 \
   --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
   --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
   --hotkey-reset-upgrade \
