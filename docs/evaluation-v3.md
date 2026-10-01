@@ -50,7 +50,7 @@ provider calls must not be added together to claim duel duration.
    command. Never copy wallet secrets into release artifacts.
 2. Choose the next unopened window and record the exact old/new policy hashes.
    Test opening a copy of the database with that schedule.
-3. Add `--eval-upgrade-window N --previous-policy OLD_HASH` to every evaluator
+3. The CLI requires `--eval-upgrade-window N --previous-policy OLD_HASH` for every evaluator
    and follower. A fresh follower needs the same schedule before replaying.
 4. Start the prepared release before window N. It follows chain state and sets
    existing weights, but does not evaluate windows before N. The ledger refuses
