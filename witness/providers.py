@@ -138,8 +138,21 @@ class ApiText:
                 {"model_requested": self.model, "status": "usage_not_received", "requested_unix": time.time()})))
         started = time.monotonic()
         try:
-            with httpx.Client(timeout=timeout, trust_env=False) as client:
-                response = client.post(endpoint, json=request, headers={"Authorization": "Bearer " + key})
+            deadline = started + timeout
+            for attempt in range(2):
+                remaining = min(self.request_timeout_s(), deadline - time.monotonic())
+                if remaining <= 0:
+                    raise httpx.ConnectTimeout('api_connection_deadline_expired')
+                try:
+                    with httpx.Client(timeout=remaining, trust_env=False) as client:
+                        response = client.post(endpoint, json=request, headers={"Authorization": "Bearer " + key})
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    # Connection establishment failed: no HTTP request was sent.
+                    # Retry once inside the original deadline and reservation.
+                    # Never retry read/write failures here: delivery is ambiguous.
+                    if attempt:
+                        raise
         except httpx.TransportError as error:
             # No answer: the call may have been billed, so its full reservation stays charged,
             # but the outcome is known to have failed and the request may be sent again.

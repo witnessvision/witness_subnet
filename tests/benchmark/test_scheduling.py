@@ -549,3 +549,20 @@ def test_miner_failure_at_deadline_requires_fresh_submission(tmp_path, reason):
     assert row['status'] == 'withdrawn' and row['result'] is None and row['finished_unix'] is None
     triggers.observe([entry(0)], {MINERS[0]})
     assert head['id'] not in {r['id'] for r in triggers.rows()}
+
+
+def test_visual_reviewer_failure_is_infrastructure_not_miner_failure(tmp_path, monkeypatch):
+    from witness.benchmark.managed_evaluator import ManagedEvaluator
+    from witness.benchmark.contract import InfrastructureError
+    from witness.benchmark.evaluator import Evaluator
+    worker,ledger,gpu=evaluator_at(tmp_path,monkeypatch,block=8)
+    class Reviewer:
+        def review(self,*args):raise RuntimeError('provider transport failure')
+    original=worker.reviewer=Reviewer()
+    worker.compression_check=lambda *args:None
+    monkeypatch.setattr(Evaluator,'_attempt',lambda self,*args:self.reviewer.review())
+    before=ledger.usage(worker.hotkey)
+    window=ledger.active
+    with pytest.raises(InfrastructureError,match='novel_review_failed'):
+        ManagedEvaluator._attempt(worker,window['candidates'][MODELS[2]],window,snapshot(8),set())
+    assert worker.reviewer is original and ledger.usage(worker.hotkey)==before and not worker.outbox

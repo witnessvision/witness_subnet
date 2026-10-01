@@ -130,3 +130,24 @@ def test_transport_failure_keeps_the_reservation_and_may_be_sent_again(tmp_path,
     reserved = DailyBudget(tmp_path / "daily.sqlite3").totals()["validator"]["settled_usd"]
     assert reserved > 0  # a call that may have been billed stays charged at its ceiling
     assert model("system", {"x": 1}, schema=SCHEMA) == {"ok": True} and len(calls) == 1
+
+
+def test_connection_establishment_retries_once_under_same_reservation(tmp_path, monkeypatch):
+    calls = []
+    fake_client(monkeypatch, calls)
+    import witness.providers as providers
+    original = providers.httpx.Client
+    attempts = []
+    class Client(original):
+        def __init__(self, **kwargs):
+            attempts.append(kwargs['timeout'])
+        def post(self, *args, **kwargs):
+            if len(attempts) == 1:
+                raise httpx.ConnectError('connection failed before request')
+            return super().post(*args, **kwargs)
+    monkeypatch.setattr(providers.httpx, 'Client', Client)
+    model = ApiText('gpt-5.6-terra', tmp_path/'cache')
+    assert model('system',{'x':1},schema=SCHEMA)=={'ok':True}
+    assert len(attempts)==2 and attempts[1]<=attempts[0]
+    with sqlite3.connect(model.ledger) as db:
+        assert db.execute('select count(*) from calls').fetchone()[0]==1

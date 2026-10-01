@@ -514,8 +514,8 @@ class ManagedEvaluator(Evaluator):
         from .contract import InfrastructureError
         meter=Performance(self.root,entry,window)
         self.performance=meter
-        original_download, original_runner, original_batch, original_judge = (
-            self.download,self.runner,self.batch_factory,self.judge)
+        original_download, original_runner, original_batch, original_judge, original_reviewer = (
+            self.download,self.runner,self.batch_factory,self.judge,self.reviewer)
         class MeasuredJudge:
             def __getattr__(self,name): return getattr(original_judge,name)
             def assess(self,*args,**kwargs):
@@ -526,6 +526,15 @@ class ManagedEvaluator(Evaluator):
                         raise
                     except Exception as error:
                         raise InfrastructureError('judge_assessment_failed') from error
+        class MeasuredReviewer:
+            def review(self,*args,**kwargs):
+                with meter.phase('novel_review_provider'):
+                    try:
+                        return original_reviewer.review(*args,**kwargs)
+                    except InfrastructureError:
+                        raise
+                    except Exception as error:
+                        raise InfrastructureError('novel_review_failed') from error
         def download(*args,**kwargs):
             cached=(self.root/'models'/args[0]['model_id']/'witness-manifest.json').exists()
             with meter.phase('cache_validation' if cached else 'download_or_prefetch_wait'):
@@ -572,6 +581,7 @@ class ManagedEvaluator(Evaluator):
                     return result
             return MeasuredRunner()
         self.download,self.runner,self.judge=download,runner,MeasuredJudge()
+        self.reviewer=MeasuredReviewer() if original_reviewer is not None else None
         error=None
         capped = False
         try:
@@ -601,8 +611,8 @@ class ManagedEvaluator(Evaluator):
             error=exc
             raise
         finally:
-            self.download,self.runner,self.batch_factory,self.judge=(
-                original_download,original_runner,original_batch,original_judge)
+            self.download,self.runner,self.batch_factory,self.judge,self.reviewer=(
+                original_download,original_runner,original_batch,original_judge,original_reviewer)
             if error and self.prefetch and self.prefetch.entry['model_id']==entry['model_id']:
                 self.prefetch.stop()
             status='deferred' if error else 'evaluation_ready_for_publication'
