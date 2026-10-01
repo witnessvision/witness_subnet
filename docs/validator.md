@@ -8,15 +8,25 @@ scores. Both modes allocate 100% to the owner burn UID before the first king,
 then 0% to burn and 100% to the single king. A deregistered king returns the
 allocation to 100% burn. Applied weights are checked as normalized proportions.
 
+For maintenance, `BURN_ALL=1` in the validator environment overrides the submitted
+vector to 100% burn. Keep `--set-weights` enabled to send it. The normal vector is
+recorded as `without_burn_override`; it is not sent. Commit/reveal can delay the
+actual chain change, so inspect applied weights, not only the intended vector.
+
 ## Activation and follower
 
 All operators must agree on **release/policy hash, activation block and actual
 subnet epoch at that block**. These values are mandatory; no production
-checkpoint is silently selected. Use a historical-state-capable chain endpoint.
+checkpoint is silently selected. The scoring transition is also mandatory for
+fresh followers: window 30 uses events-v2 and earlier windows keep their previous
+policies. See [the release schedule](launch.md). Use a historical-state-capable
+chain endpoint.
 
 ```bash
 .venv/bin/witness-validator --hotkey PUBLIC_SS58 \
   --activation-block BLOCK --activation-epoch EPOCH \
+  --eval-upgrade-window 30 \
+  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
   --root /var/lib/witness-validator --status-port 8099
 ```
 
@@ -104,6 +114,8 @@ compute cap is additional; storage, network and provider settlement can add cost
 ```bash
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
+  --eval-upgrade-window 30 \
+  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
   --status-port 8099
@@ -125,6 +137,8 @@ pinned base dependencies. Prepare the GPU environments once, before activation:
 .venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
+  --eval-upgrade-window 30 \
+  --previous-policy 14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74 \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
   --publish-results --set-weights --status-host 0.0.0.0 --status-port 8099

@@ -14,7 +14,12 @@ Validators following the current SN20 mainnet protocol use:
 | Policy digest | `d063b9d0f4bd2d659f175823c3d720be32b2d7f7d7311dd07514fa5ad3ddd918` |
 
 Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
-ledger directory. These are shared protocol coordinates, not a certificate that
+ledger directory when starting a new follower. Current CLI invocations also
+require `--eval-upgrade-window 30 --previous-policy
+14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74`.
+The events-v2 policy is `4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1`;
+[Evaluation v3](evaluation-v3.md) explains the preserved history and rollout.
+These are shared protocol coordinates, not a certificate that
 all real acceptance checks below have completed. The allocation is 100% burn
 before a king is selected, then 0% burn and 100% to the king.
 

@@ -4,11 +4,13 @@ Witness is a video-understanding subnet for Bittensor SN20. Miners serve immutab
 model weights to evaluator validators. Evaluators compare models on private,
 random audiovisual clips; CPU followers reproduce the decision from finalized
 on-chain scores. **100% of each validator's weight goes to one king, with 0% burn.**
-Before the first king is decided, the allocation is **100% burn**.
+Before the first king is decided, the allocation is **100% burn**. An operator
+can temporarily enforce **100% burn** with `BURN_ALL=1`; normal consensus weights
+continue to be calculated for inspection.
 
 [Website](https://witnessvision.io/) · [Miner guide](docs/miner.md) ·
 [Validator guide](docs/validator.md) · [Scoring](docs/benchmark.md) ·
-[Activation checklist](docs/launch.md)
+[Activation checklist](docs/launch.md) · [Evaluation v3](docs/evaluation-v3.md)
 
 ## Mainnet v2 flow
 
