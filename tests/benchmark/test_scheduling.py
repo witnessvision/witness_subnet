@@ -102,6 +102,32 @@ def test_admitted_dispatch_keeps_compression_and_evaluation_path(tmp_path, monke
     assert calls == ['compression', 'evaluation']
 
 
+@pytest.mark.parametrize('failed', [False, True])
+def test_prefetched_miner_releases_transfer_slots_before_preflight(tmp_path, monkeypatch, failed):
+    from types import SimpleNamespace
+    from witness.benchmark.evaluator import Evaluator
+    from witness.benchmark.managed_evaluator import MinerUnavailable
+    worker, ledger, gpu = evaluator_at(tmp_path, monkeypatch, block=8)
+    window = ledger.active
+    candidate = window['candidates'][MODELS[2]]
+    calls = []
+    def wait(cancelled):
+        calls.append('prefetch_finished')
+        if failed:
+            raise ConnectionError('transfer failed')
+    worker.prefetch = SimpleNamespace(entry=candidate, wait=wait)
+    monkeypatch.setattr(worker, '_start_prefetch', lambda *args: None)
+    worker.compression_check = lambda *args: calls.append('compression')
+    monkeypatch.setattr(Evaluator, '_attempt', lambda *args: calls.append('evaluation'))
+    if failed:
+        with pytest.raises(MinerUnavailable):
+            worker._attempt_checked(candidate, window, snapshot(8), set())
+        assert calls == ['prefetch_finished']
+    else:
+        worker._attempt_checked(candidate, window, snapshot(8), set())
+        assert calls == ['prefetch_finished', 'compression', 'evaluation']
+
+
 def test_unavailable_miner_requires_fresh_same_model_commitment_and_next_window(tmp_path):
     active = {MODELS[i]: entry(i) for i in range(3)}
     triggers = queue(tmp_path, active)

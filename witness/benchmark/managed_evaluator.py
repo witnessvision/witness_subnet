@@ -353,6 +353,11 @@ class ManagedEvaluator(Evaluator):
         self._start_prefetch(entry, window, snapshot)
         if self.compression_check is None:
             raise RuntimeError('compression_checker_required')
+        # The same miner may already have both transfer slots occupied by
+        # prefetch. Finish it before opening a third connection for preflight.
+        current = self.prefetch
+        if current and current.entry['model_id'] == entry['model_id']:
+            self._miner_io(lambda: current.wait(lambda: self._cancelled(window)), window)
         self._miner_io(lambda: self.compression_check(
             entry, snapshot, lambda: self._cancelled(window), 30.), window, preflight=True)
         return super()._attempt(entry, window, snapshot, partials)
