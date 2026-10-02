@@ -15,12 +15,22 @@ Validators following the current SN20 mainnet protocol use:
 
 Pass `--activation-block 9168259 --activation-epoch 25402` and use a fresh
 ledger directory when starting a new follower. Current CLI invocations also
-require the window-31 runtime / window-32 admission schedule shown in [Validator setup](validator.md).
-The events-v2 policy for window 30 remains
-`4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1`.
-Pass it as `--previous-policy`, retain the original window-30 schedule in
-`--prior-policy-upgrade`, and use `--eval-upgrade-window 31 --hotkey-reset-upgrade`.
-Install this release before window 31 opens; already-opened windows cannot be migrated.
+require the complete schedule shown in [Validator setup](validator.md).
+Window 36 switches the text judge and bounded visual reviewer to `gpt-6-luna`
+(low effort), matching the existing labeler. No second-stage Terra call or fallback
+is used. Both king and challenger are scored with Luna on the new round's clips;
+previous scores and report hashes are not rewritten. Shared labeler/judge blind
+spots remain possible; this cost change is not a claim of equal judging accuracy.
+
+Use `--eval-upgrade-window 36 --previous-policy
+94e218007681deafedea9c71cd42b779783fb137cca51a4d3f2015cdcf399cc1`
+and nest the full window-31 upgrade (including its window-32 admission reset and
+window-30 predecessor) in `--prior-policy-upgrade`, as in the guide. Do not pass
+`--hotkey-reset-upgrade` at the new top level. The new policy digest is
+`31806d75b12ebe00574ec9d4dd6afe633cf126c5cf826c7d8fefe60d12260bfb`.
+Install before window 36 opens; the evaluator waits for that boundary, while
+chain synchronization and weights continue. Already-opened windows cannot be
+migrated.
 
 At window 32, every hotkey gets one new admission opportunity. The existing king,
 closed decisions, commitments, and archived admissions/results remain intact.

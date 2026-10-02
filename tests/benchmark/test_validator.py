@@ -697,3 +697,24 @@ def test_reveal_observation_does_not_restart_chain_weight_cooldown(tmp_path):
     assert v._due(target,snapshot(101,weights_rate_limit=10,last_update={VALS[0]:6}))
     assert not v._due(target,snapshot(101,weights_rate_limit=10,last_update={VALS[0]:100}))
     v.close();ledger.close()
+
+
+def test_mainnet_scoring_uses_only_luna_for_judge_and_visual_review(tmp_path, monkeypatch):
+    from witness.benchmark.evaluator import Evaluator
+    from witness.benchmark import gpu, runner
+    from witness import providers
+    created = []
+    class API:
+        def __init__(self, model, cache, **kwargs):
+            self.model, self.effort, self.identity = model, kwargs['effort'], model
+            created.append(self)
+    monkeypatch.setattr(providers, 'ApiText', API)
+    monkeypatch.setattr(gpu, 'make_gpu', lambda *_: None)
+    monkeypatch.setattr(runner, 'runtime_identity', lambda *_: {'test': True})
+    config = {'enabled_architectures': ['qwen2.5-omni'], 'gpu': {}}
+    evaluator = Evaluator.from_config(config, tmp_path, VALS[0], None, None)
+    assert len(created) == 3 and {a.model for a in created} == {'gpt-6-luna'}
+    assert evaluator.judge.model == evaluator.reviewer.api.model == 'gpt-6-luna'
+    assert evaluator.policy.judge_id == evaluator.judge.identity
+    with pytest.raises(ValueError, match='versioned_not_per_validator'):
+        Evaluator.from_config({**config, 'judge_model': 'gpt-5.6-terra'}, tmp_path, VALS[0], None, None)

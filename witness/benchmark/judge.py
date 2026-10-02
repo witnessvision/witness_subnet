@@ -62,7 +62,7 @@ def _schema() -> dict:
 class CodexJudge:
     """Same prompt and schema through the Codex subscription or, with ``api``, the paid Responses API."""
 
-    def __init__(self, policy: Policy, *, model: str = "gpt-5.6-terra", effort: str = "low", api=None):
+    def __init__(self, policy: Policy, *, model: str = "gpt-6-luna", effort: str = "low", api=None):
         self.policy, self.model, self.effort, self.api = policy, model, effort, api
         self.prompt = JUDGE_PROMPT.format(max_facts=policy.max_facts_per_claim)
         binding = {"model": model, "effort": effort, "prompt": self.prompt, "schema": _schema()}

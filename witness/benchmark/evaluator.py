@@ -53,7 +53,7 @@ class Evaluator:
                 or any(not isinstance(a, str) or a not in ARCHITECTURES for a in enabled)):
             raise ValueError('explicit_GPU_qualified_enabled_architectures_required')
         if config.get('policy') or config.get('label_model', 'gpt-6-luna') != 'gpt-6-luna' or config.get(
-                'judge_model', 'gpt-5.6-terra') != 'gpt-5.6-terra':
+                'judge_model', 'gpt-6-luna') != 'gpt-6-luna':
             raise ValueError('mainnet_v2_scoring_policy_is_versioned_not_per_validator')
         gpu = make_gpu(config['gpu'], root)
         source_urls = json.loads(Path(config['source_urls']).read_text()) if config.get('source_urls') else None
@@ -62,7 +62,7 @@ class Evaluator:
         provider = config.get('provider', 'openai')
         labeler = ApiText('gpt-6-luna', root / 'label-cache', provider=provider, effort='low', max_tokens=16000,
                           budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
-        api = ApiText('gpt-5.6-terra', root / 'judge-cache', provider=provider, effort='low', max_tokens=16000,
+        api = ApiText('gpt-6-luna', root / 'judge-cache', provider=provider, effort='low', max_tokens=16000,
                       budget_path=str(root / 'budget.sqlite3'), daily_limit_usd=config.get('api_daily_limit_usd'))
         base = dict(runtime_hash=content_hash(runtime_identity(config['gpu'])), preprocessing_hash=PREPROCESSOR_ID,
                     reference_kind='machine', min_annotators=1, confirmation_size=2, screen_size=1,
@@ -107,7 +107,7 @@ class Evaluator:
                        gpu=gpu, api=labeler, policy=policy, source_urls=source_urls), download=download,
                    runner=lambda submissions, job: PodRunner(gpu, submissions, policy, job))
         from .novel_review import NovelReviewer
-        review_api = ApiText('gpt-5.6-terra', root / 'review-cache', provider=provider, effort='low',
+        review_api = ApiText('gpt-6-luna', root / 'review-cache', provider=provider, effort='low',
                             max_tokens=4096, budget_path=str(root / 'budget.sqlite3'),
                             daily_limit_usd=config.get('api_daily_limit_usd'))
         evaluator.reviewer = NovelReviewer(review_api)

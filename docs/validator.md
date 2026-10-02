@@ -19,17 +19,17 @@ All operators must agree on **release/policy hash, activation block and actual
 subnet epoch at that block**. These values are mandatory; no production
 checkpoint is silently selected. The scoring transition is also mandatory for
 fresh followers: window 30 uses events-v2, window 31 enables qualified SALMONN W8A8
-FP8 kernels, and window 32 resets admissions once. Earlier windows retain their
+FP8 kernels, window 32 resets admissions once, and window 36 switches judging and
+visual review to `gpt-6-luna`. Earlier windows retain their
 original policies. See [the release schedule](launch.md). Use a historical-state-capable
 chain endpoint.
 
 ```bash
 .venv/bin/witness-validator --hotkey PUBLIC_SS58 \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 31 \
-  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
-  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
-  --hotkey-reset-upgrade \
+  --eval-upgrade-window 36 \
+  --previous-policy 94e218007681deafedea9c71cd42b779783fb137cca51a4d3f2015cdcf399cc1 \
+  --prior-policy-upgrade '{"first_window":31,"previous_policy":"4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1","admission_reset":32,"prior_upgrade":{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}}' \
   --root /var/lib/witness-validator
 ```
 
@@ -107,8 +107,9 @@ before production use; existing host-key changes are rejected.
 
 Credentials go in a private `0600` env file: `OPENAI_API_KEY` for OpenAI or
 `GM_API_KEY` for `provider: saygm`, plus `RUNPOD_API_KEY` only for RunPod. Wallet
-secrets never belong there. Luna labeling and Terra judging are versioned policy,
-not per-validator tuning knobs. They share one persistent spending ledger. `api_daily_limit_usd: null` (the
+secrets never belong there. From window 36, labeling, judging and bounded visual review all use `gpt-6-luna`
+at low effort, with no Terra fallback. The model choice is versioned policy,
+not a per-validator tuning knob. They share one persistent spending ledger. `api_daily_limit_usd: null` (the
 evaluator default) records consumption without a monetary cap. Set a non-negative
 USD amount to impose your own UTC daily cap. It never changes scoring. A saved
 budget policy cannot change silently; migrate it explicitly and preserve its ledger. RunPod's
@@ -117,10 +118,9 @@ compute cap is additional; storage, network and provider settlement can add cost
 ```bash
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 31 \
-  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
-  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
-  --hotkey-reset-upgrade \
+  --eval-upgrade-window 36 \
+  --previous-policy 94e218007681deafedea9c71cd42b779783fb137cca51a4d3f2015cdcf399cc1 \
+  --prior-policy-upgrade '{"first_window":31,"previous_policy":"4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1","admission_reset":32,"prior_upgrade":{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}}' \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY
 ```
@@ -141,10 +141,9 @@ pinned base dependencies. Prepare the GPU environments once, before activation:
 .venv/bin/witness-gpu-setup --workspace /var/lib/witness-gpu
 .venv/bin/witness-validator --mode evaluator \
   --activation-block BLOCK --activation-epoch EPOCH \
-  --eval-upgrade-window 31 \
-  --previous-policy 4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1 \
-  --prior-policy-upgrade '{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}' \
-  --hotkey-reset-upgrade \
+  --eval-upgrade-window 36 \
+  --previous-policy 94e218007681deafedea9c71cd42b779783fb137cca51a4d3f2015cdcf399cc1 \
+  --prior-policy-upgrade '{"first_window":31,"previous_policy":"4dbf427e73cede9bc0b7cb357941fb52e9f5a03469caea0476a0737e6a0118a1","admission_reset":32,"prior_upgrade":{"first_window":30,"previous_policy":"14c5f5c7c038ca4a71be389cba53c484d564bbfa277490993e619b21c2062e74"}}' \
   --root /var/lib/witness-validator --config /etc/witness/evaluator.json \
   --env /etc/witness/evaluator.env --wallet-name NAME --wallet-hotkey HOTKEY \
   --publish-results --set-weights
