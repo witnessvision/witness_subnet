@@ -46,8 +46,9 @@ def _plain(value, depth=0):
 
 
 class TelemetryStore:
-    def __init__(self, root):
+    def __init__(self, root, *, peers_root=None):
         self.root = Path(root)
+        self.peers_root = Path(peers_root) if peers_root else self.root
         self.directory = self.root / 'telemetry'
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.Lock()
@@ -69,7 +70,7 @@ class TelemetryStore:
                 or abs(now - status['updated_unix']) > 120
                 or type(status.get('caught_up')) is not bool):
             raise ValueError('invalid_telemetry_status')
-        peers = json.loads((self.root / 'telemetry-peers.json').read_text())
+        peers = json.loads((self.peers_root / 'telemetry-peers.json').read_text())
         if now - peers['updated_unix'] > 120 or hotkey not in peers['validators'] or hotkey == peers['self']:
             raise ValueError('telemetry_validator_not_eligible')
         try:

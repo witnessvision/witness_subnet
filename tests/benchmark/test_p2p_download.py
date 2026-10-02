@@ -505,7 +505,9 @@ def test_invalid_compressed_length_is_transport_exclusion_not_model_rejection(tm
             client.require_compression()
 
 
-def test_real_tls_server_rejects_anonymous_nonvalidator_tampering_and_replay(tmp_path):
+def test_real_tls_server_rejects_anonymous_nonvalidator_tampering_and_replay(tmp_path, monkeypatch):
+    audit = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("WITNESS_AUDIT_LOG", str(audit))
     import ssl
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError
@@ -531,3 +533,8 @@ def test_real_tls_server_rejects_anonymous_nonvalidator_tampering_and_replay(tmp
         file = f'/v1/models/{client.submission.model_id}/files/1?offset=0&length=1'
         assert request({},file)[0] == 403
         assert request(sign(outsider,'GET',file,client.receiver),file)[0] == 403
+
+    records = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert any(r['status'] == 200 and r['authenticated_hotkey'] == client.keypair.ss58_address for r in records)
+    assert any(r['status'] == 403 and r['authenticated_hotkey'] is None for r in records)
+    assert 'X-Bittensor-Signature' not in audit.read_text() and '?changed' not in audit.read_text()

@@ -24,6 +24,7 @@ from witness.events import content_hash
 from witness.storage import sha256_file, write_private
 from .compression import (MAX_CHUNK_BYTES, MAX_FRAME_OVERHEAD, CompressionRequired,
                           decode_model_chunk, encode_model_chunk)
+from .audit import record
 from .download_budget import DownloadBudget, DownloadBudgetExceeded
 from .submission import (MAX_MANIFEST_BYTES, Submission, check_config, validate_manifest,
                          verify_directory)
@@ -162,9 +163,21 @@ class _ModelHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def handle_one_request(self):
+        self._authenticated_hotkey = None
+        return super().handle_one_request()
+
+    def send_response(self, code, message=None):
+        # Includes rejected/malformed/unsupported requests; never records their target.
+        route = 'model_manifest' if getattr(self, 'path', '').split('?', 1)[0].endswith('/manifest') else 'model_file'
+        record('model_access', status=code, method=getattr(self, 'command', 'OTHER'), route=route,
+               peer=self.client_address[0], identity=getattr(self, '_authenticated_hotkey', None))
+        super().send_response(code, message)
+
     def do_GET(self):
         server = self.server
         sender = None
+        self._authenticated_hotkey = None
         if not server.slots.acquire(blocking=False):
             self.send_error(429)
             return
@@ -173,6 +186,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
                 self.send_error(400)
                 return
             identity = server.auth.verify(self.headers, 'GET', self.path)
+            self._authenticated_hotkey = identity
             with server.sender_lock:
                 if server.active_senders.get(identity, 0) >= 2:
                     self.send_error(429)

@@ -411,3 +411,13 @@ The executor uses a validator-owned startup hook to set PyAV/FFmpeg decoder
 thread count to one. This avoids a per-frame swscale thread pool exceeding the
 process limit; model CPU/GPU inference remains separate. No miner startup code
 or model directory is placed on PYTHONPATH.
+
+### Model-server access auditing
+
+Set `WITNESS_AUDIT_LOG` to a private persistent file for authenticated model
+serving. It records accepted and rejected HTTP requests, status, socket peer IP
+and the hotkey only after authentication. It never records signatures, request
+headers, query strings or model contents. Files are mode 0600 and rotate at
+10 MiB with five backups; give each server process its own file and writable log
+directory. Model access still requires a fresh chain snapshot, validator permit,
+at least 100,000 alpha and a valid non-replayed request signature.
